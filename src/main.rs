@@ -19,14 +19,14 @@ use log::info;
 use rinsynth_model as model;
 
 const SAMPLE_RATE: u32 = 44_100;
-/// Internal engine rate — half the output rate. Rendering voices at 22.05 kHz
-/// halves the per-sample DSP cost (the binding constraint on Xtensa); a
-/// Catmull-Rom 2x interpolator reconstructs the 44.1 kHz output stream.
-/// Internal Nyquist = 11 kHz, so harmonics above that fold back — acceptable
-/// for bring-up, revisit if bright patches sound fizzy.
-const SYNTH_RATE: u32 = 22_050;
+/// Internal engine rate. Full-rate (44.1 kHz) keeps harmonics unaliased;
+/// half-rate (22.05 kHz) halves voice cost but folds >11 kHz content back
+/// as inharmonic partials — audible as a glassy edge on bright patches.
+/// Flip SYNTH_RATE + HALF_RATE together (interpolator below handles 2x).
+const SYNTH_RATE: u32 = 44_100;
+const HALF_RATE: bool = SYNTH_RATE != SAMPLE_RATE;
 const FRAMES: usize = 256;
-const SYNTH_FRAMES: usize = FRAMES / 2;
+const SYNTH_FRAMES: usize = if HALF_RATE { FRAMES / 2 } else { FRAMES };
 /// 256 output frames / 44.1 kHz
 const BLOCK_US: i64 = 5805;
 
@@ -134,6 +134,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
     preset.lfo_destination = model::lfo::LfoDestination::FilterCutoff;
     preset.lfo_rate = 0.4;
     preset.lfo_depth = 0.25;
+    preset.osc3_level = 0.0; // two detuned saws — enough for the demo, ~140cyc/sample cheaper
     info!("engine: applying preset '{}'", preset.name);
     info!(
         "engine: stack hwm after Preset::default = {}",
@@ -146,11 +147,15 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
     );
     vm.set_master_volume(0.7);
 
-    // Per-stage cycle profiler: Xtensa CCOUNT → dsp instrumentation.
+    // Per-stage cycle profiler — install only when needed; the probes
+    // themselves cost ~150 cyc/voice-sample (five rsr.ccount + atomics).
+    const PROFILE_HOOK: bool = false;
     fn ccount() -> u64 {
         unsafe { esp_idf_sys::xthal_get_ccount() as u64 }
     }
-    rinsynth_dsp::profile::set_hook(ccount);
+    if PROFILE_HOOK {
+        rinsynth_dsp::profile::set_hook(ccount);
+    }
     info!(
         "engine: profile enabled={} ccount={}",
         rinsynth_dsp::profile::enabled(),
@@ -196,23 +201,34 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
         }
         let dt = unsafe { esp_idf_sys::esp_timer_get_time() } - t0;
 
-        // 2x upsample to 44.1 kHz: even outputs pass the synth sample
-        // (one synth-frame delay via the history window), odd outputs get a
-        // Catmull-Rom midpoint  (-p0 + 9p1 + 9p2 - p3) / 16.
-        for i in 0..SYNTH_FRAMES {
-            hist[0] = hist[1];
-            hist[1] = hist[2];
-            hist[2] = hist[3];
-            hist[3] = synth[i];
-            let mid_l =
-                (9.0 * (hist[1].left + hist[2].left) - hist[0].left - hist[3].left) * 0.0625;
-            let mid_r =
-                (9.0 * (hist[1].right + hist[2].right) - hist[0].right - hist[3].right)
+        if HALF_RATE {
+            // 2x upsample: even outputs pass the synth sample (one
+            // synth-frame delay), odd outputs get a Catmull-Rom midpoint
+            // (-p0 + 9p1 + 9p2 - p3) / 16.
+            for i in 0..SYNTH_FRAMES {
+                hist[0] = hist[1];
+                hist[1] = hist[2];
+                hist[2] = hist[3];
+                hist[3] = synth[i];
+                let mid_l = (9.0 * (hist[1].left + hist[2].left)
+                    - hist[0].left
+                    - hist[3].left)
                     * 0.0625;
-            buf[4 * i] = (hist[2].left.clamp(-1.0, 1.0) * 32767.0) as i16;
-            buf[4 * i + 1] = (hist[2].right.clamp(-1.0, 1.0) * 32767.0) as i16;
-            buf[4 * i + 2] = (mid_l.clamp(-1.0, 1.0) * 32767.0) as i16;
-            buf[4 * i + 3] = (mid_r.clamp(-1.0, 1.0) * 32767.0) as i16;
+                let mid_r = (9.0 * (hist[1].right + hist[2].right)
+                    - hist[0].right
+                    - hist[3].right)
+                    * 0.0625;
+                buf[4 * i] = (hist[2].left.clamp(-1.0, 1.0) * 32767.0) as i16;
+                buf[4 * i + 1] = (hist[2].right.clamp(-1.0, 1.0) * 32767.0) as i16;
+                buf[4 * i + 2] = (mid_l.clamp(-1.0, 1.0) * 32767.0) as i16;
+                buf[4 * i + 3] = (mid_r.clamp(-1.0, 1.0) * 32767.0) as i16;
+            }
+        } else {
+            for i in 0..FRAMES {
+                let s = synth[i];
+                buf[2 * i] = (s.left.clamp(-1.0, 1.0) * 32767.0) as i16;
+                buf[2 * i + 1] = (s.right.clamp(-1.0, 1.0) * 32767.0) as i16;
+            }
         }
         if dt > max_render_us {
             max_render_us = dt;
