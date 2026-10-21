@@ -10,6 +10,17 @@ esp-idf-sys = { version = "0.38", features = ["binstart", "native"] }
 esp-idf-hal = "0.47"
 esp-idf-svc = "0.53"
 embedded-svc = "0.28"
+# Portable synth model extracted from RustInSynth — params, preset schema,
+# mod matrix, factory bank. No DSP, no fs features on target.
+rinsynth-model = { path = "../RustInSynth/crates/rinsynth-model", default-features = false }
 
 [build-dependencies]
 embuild = "0.33"
+
+# Xtensa LLVM-21 backend regression (esp-rs/rust#277): cannot lower
+# aggregate constant-pool entries — any serde f32 Deserialize impl hits
+# "Cannot select PCREL_WRAPPER" at any opt level > 0. The model crate is
+# not in the audio path, so compile it unoptimized until a fixed toolchain
+# ships (revisit on esp toolchain >= fixed LLVM-22).
+[profile.release.package.rinsynth-model]
+opt-level = 0

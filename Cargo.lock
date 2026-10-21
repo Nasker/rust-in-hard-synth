@@ -1139,6 +1139,15 @@ dependencies = [
  "esp-idf-svc",
  "esp-idf-sys",
  "log",
+ "rinsynth-model",
+]
+
+[[package]]
+name = "rinsynth-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

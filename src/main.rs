@@ -2,6 +2,9 @@
 //! Boots, outputs silence for 2 s, then a 440 Hz sine test tone,
 //! logging underrun/error counters every 10 s.
 //!
+//! Phase 2 smoke test: exercises `rinsynth-model` (param spec, preset
+//! schema, mod matrix, factory bank) on-device before the tone starts.
+//!
 //! PCM5102 wiring (proven on serviSynth):
 //!   BCK = GPIO6, LRCK = GPIO4, DOUT = GPIO5, MCLK = GPIO7 (256×fs)
 
@@ -11,6 +14,7 @@ use esp_idf_hal::i2s::I2sDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_sys as _;
 use log::info;
+use rinsynth_model as model;
 
 const SAMPLE_RATE: u32 = 44_100;
 const FRAMES: usize = 256;
@@ -19,6 +23,15 @@ fn main() -> anyhow::Result<()> {
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     info!("rinsynth-esp32 {} — I2S test tone", env!("CARGO_PKG_VERSION"));
+
+    // serde recursion through ~90 Preset fields needs far more stack than
+    // the 16 KB main task — run the smoke test on a dedicated thread.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .name("model_smoke".into())
+        .spawn(model_smoke)?
+        .join()
+        .expect("model smoke test panicked");
 
     let p = Peripherals::take()?;
 
@@ -79,4 +92,37 @@ fn main() -> anyhow::Result<()> {
 
 fn bytemuck_cast_i16(b: &[i16]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(b.as_ptr() as *const u8, b.len() * 2) }
+}
+
+/// Phase 2 smoke test: prove the portable model crate works on-target —
+/// param spec, CC map, preset serde roundtrip, mod matrix, factory bank.
+fn model_smoke() {
+    use model::types::midi_to_frequency;
+
+    let params = model::params::SynthParam::all();
+    let ccmap = model::params::CCMapping::default_mappings();
+    info!(
+        "model: {} params, {} default CC mappings",
+        params.len(),
+        ccmap.list_mappings().len()
+    );
+
+    // Preset serde roundtrip (v2 envelope)
+    let preset = model::presets::Preset::new("smoke");
+    let json = preset.to_json().expect("preset serialize");
+    let back = model::presets::Preset::from_json(&json).expect("preset parse");
+    assert_eq!(preset, back, "preset roundtrip mismatch");
+    info!("model: preset serde roundtrip ok ({} bytes)", json.len());
+
+    // Mod matrix + legacy LFO migration helper
+    let slot = model::voice::legacy_lfo_slot(&back);
+    let bank = model::presets::factory_presets();
+    info!(
+        "model: factory bank = {} presets, legacy_lfo_slot = {:?}",
+        bank.len(),
+        slot.map(|s| s.dest)
+    );
+
+    // Type sanity: midi→freq table
+    info!("model: A4 = {:.1} Hz", midi_to_frequency(69));
 }

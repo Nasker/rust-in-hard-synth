@@ -39,15 +39,29 @@ The build reuses the system ESP-IDF via `ESP_IDF` in `.cargo/config.toml`
 ```sh
 . ~/export-esp.sh
 cargo build --release
-espflash flash --port /dev/ttyACM0 target/xtensa-esp32s3-espidf/release/rinsynth-esp32
-espflash monitor --port /dev/ttyACM0        # or any 115200 serial reader
+espflash flash -p /dev/ttyACM0 target/xtensa-esp32s3-espidf/release/rinsynth-esp32 \
+    --partition-table partitions.csv
+espflash monitor -p /dev/ttyACM0            # or any 115200 serial reader
 ```
 
-## Status — Phase 1 complete
+## Status
 
-- [x] ESP-IDF Rust firmware boots on the board (16 KB main-task stack needed —
-      Rust logging overflows the 3.5 K default)
-- [x] I2S TX: 2 s silence, then 440 Hz stereo sine, underrun counter at zero
-- [ ] next: Phase 2 — extract `rinsynth-model` (param spec, preset schema)
-  from the desktop repo, then Phase 3 DSP extraction and the
-  incremental feature ladder
+- [x] Phase 1 — firmware boots (16 KB main-task stack; the 3.5 K default
+      crashes under Rust logging), I2S TX verified: 2 s silence → 440 Hz
+      stereo sine, zero write errors
+- [x] Phase 2 — `rinsynth-model` extracted to
+      `../RustInSynth/crates/rinsynth-model` (workspace crate shared with
+      the desktop host: param spec, CC map, preset schema, mod matrix,
+      factory bank). Boot runs `model_smoke()`: param/CC counts, preset
+      serde roundtrip, `legacy_lfo_slot`, factory bank, A4=440 sanity
+- [ ] Phase 3 — extract `rinsynth-dsp` (voice/osc/filter/envelope/effects)
+
+## Known toolchain landmine
+
+The esp 1.97 toolchain's LLVM-21 Xtensa backend cannot lower aggregate
+constant-pool entries — any serde `f32` `Deserialize` impl dies with
+`Cannot select XtensaISD::PCREL_WRAPPER` (esp-rs/rust#277). Fixed upstream
+(llvm-project@39a59933) but the released toolchains carrying it (1.98.x)
+have a different global-address miscompile — so the model crate is built
+with `opt-level = 0` in this firmware's profile (see `Cargo.toml`). The
+model is not on the audio hot path; revisit when a clean toolchain lands.
