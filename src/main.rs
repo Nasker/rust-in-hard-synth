@@ -96,8 +96,8 @@ extern "C" fn audio_task_trampoline(arg: *mut core::ffi::c_void) {
 }
 
 fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
-    use rinsynth_dsp::voice::VoiceManager;
-    use rinsynth_model::event::{NoteEvent, SynthEventReceiver};
+    use rinsynth_dsp::embedded::EmbeddedEngine;
+    use rinsynth_model::event::{NoteEvent};
     
 
     tx.tx_enable().expect("tx_enable");
@@ -115,9 +115,9 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
 
     let free0 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     info!("engine: free heap before vm = {}", free0);
-    // 8 voices internally — at 22.05 kHz the per-voice cost halves, so a
-    // 3-4 voice overlap fits the 5.8 ms block deadline again.
-    let mut vm = VoiceManager::new(8, SYNTH_RATE);
+    // Lean concrete engine — fixed pipeline, no dyn dispatch. Target is
+    // ~700 cyc/voice-sample: 8 voices at full 44.1 kHz inside deadline.
+    let mut vm = EmbeddedEngine::new(8, SYNTH_RATE);
     let free1 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     info!("engine: free heap after vm = {} (-{} bytes)", free1, free0 - free1);
     info!(
@@ -134,6 +134,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
     preset.lfo_destination = model::lfo::LfoDestination::FilterCutoff;
     preset.lfo_rate = 0.4;
     preset.lfo_depth = 0.25;
+    preset.amp_release = 0.6; // longer tails — exercise more voice overlap
     preset.osc3_level = 0.0; // two detuned saws — enough for the demo, ~140cyc/sample cheaper
     info!("engine: applying preset '{}'", preset.name);
     info!(
