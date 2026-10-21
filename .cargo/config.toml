@@ -1,0 +1,20 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+# runner = "espflash flash --monitor"
+rustflags = [
+  "--cfg", "espidf_time64",
+  "-C", "default-linker-libraries",
+]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+# Reuse the system ESP-IDF v5.5.1 instead of downloading another copy
+ESP_IDF = "/home/oscarmartinez/esp/v5.5.1/esp-idf"
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.5.1"
+ESP_IDF_COMPONENT_MANAGER = "y"

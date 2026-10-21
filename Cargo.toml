@@ -1,0 +1,15 @@
+[package]
+name = "rinsynth-esp32"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+anyhow = "1"
+esp-idf-sys = { version = "0.38", features = ["binstart", "native"] }
+esp-idf-hal = "0.47"
+esp-idf-svc = "0.53"
+embedded-svc = "0.28"
+
+[build-dependencies]
+embuild = "0.33"
