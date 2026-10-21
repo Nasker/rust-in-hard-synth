@@ -1,16 +1,18 @@
-//! rinsynth-esp32 — Phase 1: prove I²S on the PCM5102.
-//! Boots, outputs silence for 2 s, then a 440 Hz sine test tone,
-//! logging underrun/error counters every 10 s.
+//! rinsynth-esp32 — ESP32-S3 firmware port of RustInSynth.
 //!
-//! Phase 2 smoke test: exercises `rinsynth-model` (param spec, preset
-//! schema, mod matrix, factory bank) on-device before the tone starts.
+//! Phase 1: I²S to the PCM5102 (44.1 kHz / 16-bit stereo).
+//! Phase 2: `rinsynth-model` on-device (param spec, preset serde, factory bank).
+//! Phase 3: `rinsynth-dsp` — the actual engine renders a polyphonic
+//!          factory-preset arpeggio, with per-block render-time telemetry.
 //!
 //! PCM5102 wiring (proven on serviSynth):
 //!   BCK = GPIO6, LRCK = GPIO4, DOUT = GPIO5, MCLK = GPIO7 (256×fs)
 
 use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::i2s::config::{Config, DataBitWidth, SlotMode, StdClkConfig, StdConfig, StdGpioConfig, StdSlotConfig};
-use esp_idf_hal::i2s::I2sDriver;
+use esp_idf_hal::i2s::config::{
+    Config, DataBitWidth, SlotMode, StdClkConfig, StdConfig, StdGpioConfig, StdSlotConfig,
+};
+use esp_idf_hal::i2s::{I2sDriver, I2sTx};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_sys as _;
 use log::info;
@@ -18,11 +20,13 @@ use rinsynth_model as model;
 
 const SAMPLE_RATE: u32 = 44_100;
 const FRAMES: usize = 256;
+/// 256 frames / 44.1 kHz
+const BLOCK_US: i64 = 5805;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-    info!("rinsynth-esp32 {} — I2S test tone", env!("CARGO_PKG_VERSION"));
+    info!("rinsynth-esp32 {} — dsp engine render", env!("CARGO_PKG_VERSION"));
 
     // serde recursion through ~90 Preset fields needs far more stack than
     // the 16 KB main task — run the smoke test on a dedicated thread.
@@ -42,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         StdGpioConfig::default(),
     );
 
-    let mut tx = I2sDriver::new_std_tx(
+    let tx = I2sDriver::new_std_tx(
         p.i2s0,
         &std_cfg,
         p.pins.gpio6,       // BCK
@@ -51,40 +55,181 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio4,       // LRCK/WS
     )?;
 
-    tx.tx_enable()?;
-    info!("I2S TX running @ {} Hz stereo 16-bit", SAMPLE_RATE);
-
-    // 2 s of silence so the DAC/amp settles before the tone
-    let mut buf = [0i16; FRAMES * 2];
-    for _ in 0..(SAMPLE_RATE / FRAMES as u32 * 2) {
-        tx.write(bytemuck_cast_i16(&buf), 1000)?;
+    // The engine needs a fat stack too (apply_preset + Voice init), and the
+    // render loop must never share the small main-task stack with logging.
+    // Spawned as a raw FreeRTOS task: the ThreadSpawnConfiguration/
+    // esp_pthread_set_cfg path demonstrably did NOT size the pthread
+    // (hwm read 0 with a nominal 160 KB stack), while xTaskCreatePinnedToCore
+    // gives deterministic stack + priority + core pinning in one call.
+    let tx = Box::new(tx);
+    unsafe {
+        esp_idf_hal::task::create(
+            audio_task_trampoline,
+            c"rinsynth-audio",
+            64 * 1024,
+            Box::into_raw(tx) as *mut _,
+            10,
+            Some(esp_idf_hal::cpu::Core::Core1),
+        )
+        .expect("create audio task");
     }
 
-    info!("tone: 440 Hz sine");
-    let mut phase: f32 = 0.0;
-    let inc = 440.0 / SAMPLE_RATE as f32;
+    // Main task idles from here on — keep it out of the audio path.
+    loop {
+        esp_idf_hal::delay::FreeRtos::delay_ms(60_000);
+    }
+}
+
+extern "C" fn audio_task_trampoline(arg: *mut core::ffi::c_void) {
+    let tx = unsafe { Box::from_raw(arg as *mut I2sDriver<'static, I2sTx>) };
+    if std::panic::catch_unwind(move || audio_task(*tx)).is_err() {
+        log::error!("audio task panicked — halting task");
+    }
+    unsafe { esp_idf_sys::vTaskDelete(core::ptr::null_mut()) }
+}
+
+fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
+    use rinsynth_dsp::voice::VoiceManager;
+    use rinsynth_model::event::{NoteEvent, SynthEventReceiver};
+    
+
+    tx.tx_enable().expect("tx_enable");
+    info!("I2S TX running @ {} Hz stereo 16-bit", SAMPLE_RATE);
+
+    // Heap sanity on this pthread before touching the engine
+    let probe = String::from("alloc-probe");
+    info!("engine: trivial alloc ok: {}", probe);
+    info!(
+        "engine: heap total={} internal={} default8bit={}",
+        unsafe { esp_idf_sys::esp_get_free_heap_size() },
+        unsafe { esp_idf_sys::heap_caps_get_free_size(esp_idf_sys::MALLOC_CAP_INTERNAL) },
+        unsafe { esp_idf_sys::heap_caps_get_free_size(esp_idf_sys::MALLOC_CAP_8BIT) },
+    );
+
+    let free0 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
+    info!("engine: free heap before vm = {}", free0);
+    // 4 voices for the on-device demo — the Xtensa port currently pays
+    // ~3.4 µs/sample/voice (soft libm + FPU latency), so 4 voices keeps a
+    // 256-frame block inside the 5.8 ms deadline with margin for FX later.
+    let mut vm = VoiceManager::new(4, SAMPLE_RATE);
+    let free1 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
+    info!("engine: free heap after vm = {} (-{} bytes)", free1, free0 - free1);
+    info!(
+        "engine: stack hwm before preset = {}",
+        unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
+    );
+
+    // A factory pad, if the bank ships one — otherwise the default saw lead.
+    // NB: factory_presets() materializes the whole 85-preset bank via one
+    // giant vec! literal — at opt-level 0 that smashes the stack (and then
+    // the heap). For now: default "Init" lead preset, tastefully nudged.
+    let mut preset = model::presets::Preset::default();
+    preset.polyphony_mode = model::voice::PolyphonyMode::Poly;
+    preset.lfo_destination = model::lfo::LfoDestination::FilterCutoff;
+    preset.lfo_rate = 0.4;
+    preset.lfo_depth = 0.25;
+    info!("engine: applying preset '{}'", preset.name);
+    info!(
+        "engine: stack hwm after Preset::default = {}",
+        unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
+    );
+    vm.apply_preset(&preset);
+    info!(
+        "engine: stack hwm after apply_preset = {}",
+        unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
+    );
+    vm.set_master_volume(0.7);
+
+    // Per-stage cycle profiler: Xtensa CCOUNT → dsp instrumentation.
+    fn ccount() -> u64 {
+        unsafe { esp_idf_sys::xthal_get_ccount() as u64 }
+    }
+    rinsynth_dsp::profile::set_hook(ccount);
+    info!(
+        "engine: profile enabled={} ccount={}",
+        rinsynth_dsp::profile::enabled(),
+        ccount()
+    );
+
+    // 2 s of silence so the DAC/amp settles before sound
+    let mut buf = [0i16; FRAMES * 2];
+    for _ in 0..(SAMPLE_RATE / FRAMES as u32 * 2) {
+        tx.write(bytemuck_cast_i16(&buf), 1000).ok();
+    }
+
+    // Cmaj9-style arp loop: 8 steps, voices overlap and ring (poly mode).
+    const ARP: [u8; 8] = [48, 64, 67, 71, 74, 71, 67, 64];
+    const STEP_BLOCKS: u32 = 43; // ~250 ms
+
+    info!("engine: arp start");
     let mut blocks: u32 = 0;
     let mut underruns: u32 = 0;
+    let mut max_render_us: i64 = 0;
 
     loop {
-        for i in 0..FRAMES {
-            let s = (phase * 2.0 * core::f32::consts::PI).sin() * 0.5;
-            let v = (s * 32767.0) as i16;
-            buf[2 * i] = v;
-            buf[2 * i + 1] = v;
-            phase += inc;
-            if phase >= 1.0 {
-                phase -= 1.0;
-            }
+        // Early bring-up visibility: print every block for the first 20,
+        // then settle into ~1 s windows.
+        let verbose = blocks < 20;
+        // note on this step's key
+        if blocks % STEP_BLOCKS == 0 {
+            let step = (blocks / STEP_BLOCKS) as usize;
+            vm.receive_event(NoteEvent::note_on_midi(ARP[step % ARP.len()], 104));
         }
-        match tx.write(bytemuck_cast_i16(&buf), 1000) {
-            Ok(_) => {}
-            Err(_) => underruns += 1,
+        // release the key 1 step back — bounds overlap to ~2 voices,
+        // which is what the Xtensa render budget can currently sustain
+        if blocks % STEP_BLOCKS == STEP_BLOCKS / 2 {
+            let step = ((blocks / STEP_BLOCKS) as usize).wrapping_sub(1);
+            vm.receive_event(NoteEvent::note_off(ARP[step % ARP.len()]));
+        }
+
+        let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
+        for i in 0..FRAMES {
+            let s = vm.next_sample_stereo();
+            buf[2 * i] = (s.left.clamp(-1.0, 1.0) * 32767.0) as i16;
+            buf[2 * i + 1] = (s.right.clamp(-1.0, 1.0) * 32767.0) as i16;
+        }
+        let dt = unsafe { esp_idf_sys::esp_timer_get_time() } - t0;
+        if dt > max_render_us {
+            max_render_us = dt;
+        }
+
+        if tx.write(bytemuck_cast_i16(&buf), 1000).is_err() {
+            underruns += 1;
+        }
+        if verbose {
+            info!(
+                "block {} | voices: {} | render: {}us",
+                blocks,
+                vm.active_voice_count(),
+                dt
+            );
         }
         blocks += 1;
-        if blocks % 1723 == 0 {
-            // ~10 s of blocks
-            info!("blocks: {} | write errors: {}", blocks, underruns);
+        if blocks % 172 == 0 {
+            // ~1 s of blocks
+            info!(
+                "blocks: {} | voices: {} | render max: {}us/{}us | write errors: {}",
+                blocks,
+                vm.active_voice_count(),
+                max_render_us,
+                BLOCK_US,
+                underruns
+            );
+            // Per-stage cycle breakdown (cycles per rendered sample, this second)
+            let snap = rinsynth_dsp::profile::snapshot();
+            if snap[rinsynth_dsp::profile::SAMPLES] > 0 {
+                let n = snap[rinsynth_dsp::profile::SAMPLES];
+                info!(
+                    "profile cyc/sample: env={} ctrl={} osc={} filt={} (n={})",
+                    snap[rinsynth_dsp::profile::ENV] / n,
+                    snap[rinsynth_dsp::profile::CONTROL] / n,
+                    snap[rinsynth_dsp::profile::OSC] / n,
+                    snap[rinsynth_dsp::profile::FILTER] / n,
+                    n
+                );
+            }
+            rinsynth_dsp::profile::reset();
+            max_render_us = 0;
         }
         FreeRtos::delay_ms(0);
     }

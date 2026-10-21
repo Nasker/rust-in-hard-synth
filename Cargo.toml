@@ -13,6 +13,9 @@ embedded-svc = "0.28"
 # Portable synth model extracted from RustInSynth — params, preset schema,
 # mod matrix, factory bank. No DSP, no fs features on target.
 rinsynth-model = { path = "../RustInSynth/crates/rinsynth-model", default-features = false }
+# Portable DSP core (voice/filter/osc/envelope/effects). No serde — safe at
+# opt-level 3, unlike the model crate (see profile note below).
+rinsynth-dsp = { path = "../RustInSynth/crates/rinsynth-dsp" }
 
 [build-dependencies]
 embuild = "0.33"

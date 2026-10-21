@@ -1129,6 +1129,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rinsynth-dsp"
+version = "0.1.0"
+dependencies = [
+ "rinsynth-model",
+]
+
+[[package]]
 name = "rinsynth-esp32"
 version = "0.1.0"
 dependencies = [
@@ -1139,6 +1146,7 @@ dependencies = [
  "esp-idf-svc",
  "esp-idf-sys",
  "log",
+ "rinsynth-dsp",
  "rinsynth-model",
 ]
 
