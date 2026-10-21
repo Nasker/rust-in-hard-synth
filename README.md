@@ -54,7 +54,22 @@ espflash monitor -p /dev/ttyACM0            # or any 115200 serial reader
       the desktop host: param spec, CC map, preset schema, mod matrix,
       factory bank). Boot runs `model_smoke()`: param/CC counts, preset
       serde roundtrip, `legacy_lfo_slot`, factory bank, A4=440 sanity
-- [ ] Phase 3 — extract `rinsynth-dsp` (voice/osc/filter/envelope/effects)
+- [x] Phase 3 — `rinsynth-dsp` renders a real arpeggio on hardware
+      (8-voice `VoiceManager`, factory-Init preset, LFO on cutoff).
+
+### Render architecture
+
+The engine runs **internally at 22.05 kHz** and the firmware 2x-upsamples
+to the 44.1 kHz I2S stream with a Catmull-Rom midpoint interpolator
+(`src/main.rs`). Rationale: per-voice cost on Xtensa measured ~1500
+cycles/voice-sample (in-order core + FPU latency chains + `dyn`
+dispatch) — half-rate halves it, and 3-voice blocks dropped from
+7.3 ms to 3.8 ms vs the 5.8 ms deadline. Trade-off: internal Nyquist
+is 11 kHz (brighter patches may alias); revisit with static dispatch
+or dual-core voice splitting if needed.
+
+Telemetry: `rinsynth_dsp::profile` reports per-stage cycles/sample
+(env/ctrl/osc/filter) via `xthal_get_ccount` once per second.
 
 ## Known toolchain landmine
 

@@ -19,8 +19,15 @@ use log::info;
 use rinsynth_model as model;
 
 const SAMPLE_RATE: u32 = 44_100;
+/// Internal engine rate — half the output rate. Rendering voices at 22.05 kHz
+/// halves the per-sample DSP cost (the binding constraint on Xtensa); a
+/// Catmull-Rom 2x interpolator reconstructs the 44.1 kHz output stream.
+/// Internal Nyquist = 11 kHz, so harmonics above that fold back — acceptable
+/// for bring-up, revisit if bright patches sound fizzy.
+const SYNTH_RATE: u32 = 22_050;
 const FRAMES: usize = 256;
-/// 256 frames / 44.1 kHz
+const SYNTH_FRAMES: usize = FRAMES / 2;
+/// 256 output frames / 44.1 kHz
 const BLOCK_US: i64 = 5805;
 
 fn main() -> anyhow::Result<()> {
@@ -108,10 +115,9 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
 
     let free0 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     info!("engine: free heap before vm = {}", free0);
-    // 4 voices for the on-device demo — the Xtensa port currently pays
-    // ~3.4 µs/sample/voice (soft libm + FPU latency), so 4 voices keeps a
-    // 256-frame block inside the 5.8 ms deadline with margin for FX later.
-    let mut vm = VoiceManager::new(4, SAMPLE_RATE);
+    // 8 voices internally — at 22.05 kHz the per-voice cost halves, so a
+    // 3-4 voice overlap fits the 5.8 ms block deadline again.
+    let mut vm = VoiceManager::new(8, SYNTH_RATE);
     let free1 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     info!("engine: free heap after vm = {} (-{} bytes)", free1, free0 - free1);
     info!(
@@ -156,6 +162,8 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
     for _ in 0..(SAMPLE_RATE / FRAMES as u32 * 2) {
         tx.write(bytemuck_cast_i16(&buf), 1000).ok();
     }
+    let mut synth = [model::types::StereoSample::ZERO; SYNTH_FRAMES];
+    let mut hist = [model::types::StereoSample::ZERO; 4];
 
     // Cmaj9-style arp loop: 8 steps, voices overlap and ring (poly mode).
     const ARP: [u8; 8] = [48, 64, 67, 71, 74, 71, 67, 64];
@@ -175,20 +183,37 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
             let step = (blocks / STEP_BLOCKS) as usize;
             vm.receive_event(NoteEvent::note_on_midi(ARP[step % ARP.len()], 104));
         }
-        // release the key 1 step back — bounds overlap to ~2 voices,
-        // which is what the Xtensa render budget can currently sustain
+        // release the key from 3 steps back — bounds voice count while
+        // letting release tails overlap
         if blocks % STEP_BLOCKS == STEP_BLOCKS / 2 {
-            let step = ((blocks / STEP_BLOCKS) as usize).wrapping_sub(1);
+            let step = ((blocks / STEP_BLOCKS) as usize).wrapping_sub(3);
             vm.receive_event(NoteEvent::note_off(ARP[step % ARP.len()]));
         }
 
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
-        for i in 0..FRAMES {
-            let s = vm.next_sample_stereo();
-            buf[2 * i] = (s.left.clamp(-1.0, 1.0) * 32767.0) as i16;
-            buf[2 * i + 1] = (s.right.clamp(-1.0, 1.0) * 32767.0) as i16;
+        for i in 0..SYNTH_FRAMES {
+            synth[i] = vm.next_sample_stereo();
         }
         let dt = unsafe { esp_idf_sys::esp_timer_get_time() } - t0;
+
+        // 2x upsample to 44.1 kHz: even outputs pass the synth sample
+        // (one synth-frame delay via the history window), odd outputs get a
+        // Catmull-Rom midpoint  (-p0 + 9p1 + 9p2 - p3) / 16.
+        for i in 0..SYNTH_FRAMES {
+            hist[0] = hist[1];
+            hist[1] = hist[2];
+            hist[2] = hist[3];
+            hist[3] = synth[i];
+            let mid_l =
+                (9.0 * (hist[1].left + hist[2].left) - hist[0].left - hist[3].left) * 0.0625;
+            let mid_r =
+                (9.0 * (hist[1].right + hist[2].right) - hist[0].right - hist[3].right)
+                    * 0.0625;
+            buf[4 * i] = (hist[2].left.clamp(-1.0, 1.0) * 32767.0) as i16;
+            buf[4 * i + 1] = (hist[2].right.clamp(-1.0, 1.0) * 32767.0) as i16;
+            buf[4 * i + 2] = (mid_l.clamp(-1.0, 1.0) * 32767.0) as i16;
+            buf[4 * i + 3] = (mid_r.clamp(-1.0, 1.0) * 32767.0) as i16;
+        }
         if dt > max_render_us {
             max_render_us = dt;
         }
