@@ -3,256 +3,477 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>RustInSynth · ESP32-S3</title>
+<title>RUST IN SYNTH · ESP32-S3</title>
 <style>
+  :root {
+    --bg-blue: #0f192d;
+    --bg-blue-light: #192337;
+    --panel-bg: #192337;
+    --panel-border: #232d41;
+    --panel-shadow: #0a1423;
+    --logo-red: #dc3c14;
+    --logo-red-dark: #a0280a;
+    --logo-red-light: #ff6432;
+    --chrome: #c6d0de;
+    --chrome-light: #ecf2fa;
+    --chrome-shadow: #182030;
+    --gold: #ffb428;
+    --gold-dark: #c88c14;
+    --gold-light: #ffc850;
+    --toxic: #28ff50;
+    --toxic-dark: #14b432;
+    --toxic-light: #64ff78;
+    --toxic-deep: #062e10;
+    --steel-dark: #232328;
+    --steel-med: #323237;
+    --rust: #964218;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-  body { background: #121316; color: #ddd; font: 13px/1.4 system-ui, -apple-system, sans-serif;
-         display: flex; flex-direction: column; align-items: center; padding: 12px; gap: 12px;
-         user-select: none; touch-action: manipulation; }
-  header { display: flex; align-items: center; justify-content: space-between;
-           width: 100%; max-width: 1180px; padding: 4px 6px; }
-  h1 { font-size: 15px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #e2e8f0; }
-  h1 span { color: #f97316; font-weight: 400; font-size: 12px; margin-left: 6px; }
-  h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #60a5fa; margin: 6px 0 6px; }
-  h2:first-child { margin-top: 0; }
-  #status { font-size: 12px; color: #6f6; }
+  body {
+    background-color: var(--bg-blue);
+    background-image:
+      linear-gradient(to top, rgba(150, 66, 24, 0.22) 0%, transparent 28%),
+      repeating-linear-gradient(90deg, rgba(90, 120, 170, 0.14) 0px, rgba(90, 120, 170, 0.14) 1px, transparent 1px, transparent 72px),
+      repeating-linear-gradient(0deg, rgba(70, 95, 140, 0.10) 0px, rgba(70, 95, 140, 0.10) 1px, transparent 1px, transparent 180px);
+    color: var(--chrome);
+    font: 12px/1.35 system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 8px 12px 16px; gap: 8px;
+    user-select: none; touch-action: manipulation;
+  }
+  /* Top banner matching egui shell() */
+  .topbar {
+    width: 100%; max-width: 1140px; min-height: 36px;
+    background: linear-gradient(180deg, #1b263c 0%, #121b2d 100%);
+    border: 1px solid var(--panel-border); border-radius: 4px;
+    box-shadow: 2px 2px 4px var(--panel-shadow);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 12px; position: relative;
+  }
+  .topbar .ver { font: 10px monospace; color: var(--gold-dark); }
+  .topbar .chrome-title {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    font-size: 18px; font-weight: 800; letter-spacing: 0.22em;
+    color: var(--chrome);
+    text-shadow: 0 -1px 0 var(--chrome-light), 0 2px 0 var(--chrome-shadow), 0 3px 4px #000;
+    border-bottom: 1px solid var(--gold-dark); padding-bottom: 1px;
+    white-space: nowrap;
+  }
+  .topbar .subtitle {
+    font-size: 9px; letter-spacing: 0.30em; color: var(--gold-dark);
+    text-transform: uppercase;
+  }
+  @media (max-width: 740px) { .topbar .subtitle { display: none; } }
+
+  /* Tab strip: SYNTH | ROUTING MATRIX | PRESETS */
+  .tabbar {
+    width: 100%; max-width: 1140px; display: flex; align-items: center;
+    justify-content: space-between; border-bottom: 1px solid var(--panel-border);
+    padding: 2px 4px 6px; gap: 8px; flex-wrap: wrap;
+  }
+  .tabs { display: flex; gap: 6px; }
+  .tabs button {
+    padding: 6px 14px; border: 1px solid var(--panel-border); border-radius: 4px;
+    background: var(--bg-blue-light); color: var(--logo-red);
+    font-size: 12px; font-weight: 700; letter-spacing: 0.08em; cursor: pointer;
+  }
+  .tabs button:hover { border-color: var(--gold); color: var(--gold); }
+  .tabs button.active {
+    background: var(--toxic-deep); border-color: var(--toxic);
+    color: var(--toxic-light); box-shadow: 0 0 8px rgba(40, 255, 80, 0.25);
+  }
+  #status { font: 11px monospace; color: var(--toxic); }
   #status::before { content: "● "; }
-  #status.off { color: #f66; }
-  .deck { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;
-          width: 100%; max-width: 1180px; }
-  .panel { width: min(360px, 100%); background: #1b1d22; border: 1px solid #282c34;
-           border-radius: 12px; padding: 12px 14px; }
-  .panel.wide { width: min(732px, 100%); }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
-  .row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
-  .row button, select { flex: 1; padding: 7px 6px; border: 1px solid #323640; border-radius: 7px;
-                        background: #232730; color: #bbb; font-size: 12px; cursor: pointer; }
-  .row button.active { background: #3b82f6; border-color: #3b82f6; color: #fff; font-weight: 600; }
-  select { flex: 3; color: #eee; font-size: 13px; padding: 7px 10px; }
-  .cats button { padding: 5px 8px; font-size: 11px; flex: none; }
-  .slider label { display: flex; justify-content: space-between; font-size: 11px;
-                  color: #9aa0ac; margin-bottom: 2px; }
-  .slider label span { color: #e2e8f0; font-variant-numeric: tabular-nums; }
-  .slider input { width: 100%; accent-color: #3b82f6; }
-  .oct { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
-  .oct button { padding: 8px 18px; border: 1px solid #323640; border-radius: 8px;
-                background: #232730; color: #ddd; font-size: 15px; cursor: pointer; }
-  #octval { color: #9aa0ac; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-  #keys { position: relative; height: 145px; max-width: 732px; width: 100%; }
-  .key { position: absolute; top: 0; border: 1px solid #111; border-radius: 0 0 5px 5px; cursor: pointer; }
-  .key.w { background: #e5e7eb; height: 100%; z-index: 1; }
-  .key.w.down { background: #93c5fd; }
-  .key.b { background: #141619; height: 60%; z-index: 2; border-radius: 0 0 4px 4px; }
-  .key.b.down { background: #3b82f6; }
+  #status.off { color: var(--logo-red-light); }
+
+  .page { display: none; width: 100%; max-width: 1140px; }
+  .page.active { display: block; }
+
+  /* 4-column synth deck matching panels.rs */
+  .synth-cols {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(265px, 1fr));
+    gap: 10px; align-items: start;
+  }
+  .col {
+    background: linear-gradient(180deg, var(--panel-bg) 0%, #11192b 100%);
+    border: 1px solid var(--panel-border); border-radius: 4px;
+    box-shadow: 2px 2px 4px var(--panel-shadow); padding: 10px 12px;
+  }
+  .sec-hdr {
+    font-size: 12px; font-weight: 800; letter-spacing: 0.10em;
+    color: var(--logo-red); text-transform: uppercase; margin: 4px 0 8px;
+    border-bottom: 1px solid rgba(220, 60, 20, 0.3); padding-bottom: 2px;
+  }
+  .sec-hdr:first-child { margin-top: 0; }
+  .grp {
+    background: rgba(10, 18, 32, 0.65); border: 1px solid var(--panel-border);
+    border-radius: 4px; padding: 8px 10px; margin-bottom: 8px;
+  }
+  .grp:last-child { margin-bottom: 0; }
+  .grp-title {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 10px; font-weight: 800; letter-spacing: 0.08em;
+    color: var(--gold); margin-bottom: 6px; text-transform: uppercase;
+  }
+  .wf-row { display: flex; gap: 3px; margin-bottom: 6px; }
+  .wf-row button {
+    flex: 1; padding: 4px 2px; border: 1px solid var(--steel-med); border-radius: 3px;
+    background: var(--steel-dark); color: var(--chrome); font-size: 10px;
+    font-weight: 600; cursor: pointer;
+  }
+  .wf-row button:hover { border-color: var(--gold); color: var(--gold); }
+  .wf-row button.active {
+    background: var(--toxic-deep); border-color: var(--toxic);
+    color: var(--toxic); font-weight: 700;
+  }
+
+  /* Radioactive green slider with gold monospace value readout */
+  .srow {
+    display: grid; grid-template-columns: 58px 1fr 48px;
+    align-items: center; gap: 6px; margin-bottom: 4px;
+  }
+  .srow label { font-size: 10px; color: var(--logo-red-light); white-space: nowrap; }
+  .srow .val {
+    font: 10px monospace; color: var(--gold); text-align: right;
+    background: #09101d; border: 1px solid var(--panel-border);
+    border-radius: 3px; padding: 1px 4px;
+  }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 12px;
+    background: var(--toxic-deep); border: 1px solid var(--toxic-dark);
+    border-radius: 3px; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 12px; height: 16px;
+    border-radius: 2px; background: var(--toxic);
+    border: 1px solid var(--toxic-light);
+    box-shadow: 0 0 6px var(--toxic); cursor: grab;
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 12px; height: 16px; border-radius: 2px; background: var(--toxic);
+    border: 1px solid var(--toxic-light); box-shadow: 0 0 6px var(--toxic); cursor: grab;
+  }
+
+  /* Routing Matrix table */
+  .matrix-box {
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: 4px; box-shadow: 2px 2px 4px var(--panel-shadow); padding: 12px;
+  }
+  .mrow {
+    display: grid; grid-template-columns: 50px 1fr 24px 1fr 1.2fr 54px;
+    align-items: center; gap: 8px; padding: 6px 8px;
+    background: rgba(10, 18, 32, 0.6); border: 1px solid var(--panel-border);
+    border-radius: 4px; margin-bottom: 6px;
+  }
+  .mrow select {
+    padding: 5px 6px; background: var(--bg-blue); color: var(--gold-light);
+    border: 1px solid var(--toxic-dark); border-radius: 3px; font-size: 11px;
+  }
+  .mrow .slot-lbl { font: 11px monospace; color: var(--gold); font-weight: 700; }
+  .mrow .arrow { color: var(--logo-red); text-align: center; font-weight: 800; }
+
+  /* Preset shelves matching preset_shelf() in panels.rs */
+  .shelves {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 10px;
+  }
+  .shelf {
+    background: rgba(6, 12, 24, 0.78); border: 1px solid var(--panel-border);
+    border-radius: 4px; padding: 8px; height: 240px; display: flex; flex-direction: column;
+  }
+  .shelf-hdr {
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--panel-border); padding-bottom: 4px; margin-bottom: 6px;
+  }
+  .shelf-hdr span:first-child { color: var(--gold); font-weight: 800; font-size: 11px; letter-spacing: 0.08em; }
+  .shelf-hdr span:last-child { color: var(--logo-red); font: 10px monospace; }
+  .shelf-list { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .shelf-list button {
+    text-align: left; padding: 4px 6px; background: transparent; border: 1px solid transparent;
+    border-radius: 3px; color: var(--chrome); font-size: 11px; cursor: pointer;
+  }
+  .shelf-list button:hover { background: var(--bg-blue-light); color: var(--gold-light); }
+  .shelf-list button.active {
+    background: var(--toxic-deep); border-color: var(--toxic-dark);
+    color: var(--toxic-light); font-weight: 700;
+  }
+
+  /* Bottom keyboard deck */
+  .kbd-bar {
+    width: 100%; max-width: 1140px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: 4px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .kbd-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .kbd-top button {
+    padding: 4px 12px; background: var(--steel-dark); color: var(--gold);
+    border: 1px solid var(--panel-border); border-radius: 3px; cursor: pointer; font-weight: 700;
+  }
+  .kbd-top select {
+    padding: 4px 8px; background: var(--bg-blue); color: var(--gold);
+    border: 1px solid var(--toxic-dark); border-radius: 3px; font-size: 12px; min-width: 210px;
+  }
+  #keys { position: relative; height: 115px; width: 100%; }
+  .key { position: absolute; top: 0; border: 1px solid #090d16; border-radius: 0 0 4px 4px; cursor: pointer; }
+  .key.w { background: linear-gradient(180deg, #cad4e0 0%, #eef3f8 100%); height: 100%; z-index: 1; }
+  .key.w.down { background: var(--toxic); box-shadow: 0 0 10px var(--toxic); }
+  .key.b { background: linear-gradient(180deg, #182030 0%, #0b101b 100%); height: 60%; z-index: 2; border-radius: 0 0 3px 3px; border-color: #000; }
+  .key.b.down { background: var(--gold); box-shadow: 0 0 10px var(--gold); }
 </style>
 </head>
 <body>
-<header>
-  <h1>RustInSynth <span>ESP32-S3 · PolyBLEP + TPT SVF</span></h1>
-  <div id="status">ready</div>
-</header>
 
-<div class="deck">
+<div class="topbar">
+  <span class="ver">v1.2 · ESP32-S3</span>
+  <div class="chrome-title">RUST IN SYNTH</div>
+  <span class="subtitle">ANALOG-MODELED SUBTRACTIVE SYNTHESIZER</span>
+</div>
 
-<div class="panel wide">
-  <h2>Factory Presets (85)</h2>
-  <div class="row cats" id="cats"></div>
-  <div class="row">
-    <button id="pprev" style="flex:0 0 44px">◀</button>
-    <select id="psel"></select>
-    <button id="pnext" style="flex:0 0 44px">▶</button>
+<div class="tabbar">
+  <div class="tabs">
+    <button class="active" data-tab="synth">SYNTH</button>
+    <button data-tab="matrix">ROUTING MATRIX</button>
+    <button data-tab="presets">PRESETS</button>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px">
+    <button id="pprev" style="padding:4px 8px;background:#232328;color:#ffb428;border:1px solid #323237;border-radius:3px;cursor:pointer">◀</button>
+    <select id="psel" style="padding:4px 8px;background:#0f192d;color:#ffb428;border:1px solid #14b432;border-radius:3px;font-size:11px"></select>
+    <button id="pnext" style="padding:4px 8px;background:#232328;color:#ffb428;border:1px solid #323237;border-radius:3px;cursor:pointer">▶</button>
+    <div id="status">ONLINE</div>
   </div>
 </div>
 
-<div class="panel">
-  <h2>Oscillator 1</h2>
-  <div class="row" id="w1">
-    <button data-v="0">sine</button>
-    <button data-v="1">sqr</button>
-    <button data-v="2" class="active">saw</button>
-    <button data-v="3">tri</button>
-    <button data-v="4">noise</button>
-    <button data-v="5">pulse</button>
-  </div>
-  <h2>Oscillator 2</h2>
-  <div class="row" id="w2">
-    <button data-v="0">sine</button>
-    <button data-v="1">sqr</button>
-    <button data-v="2" class="active">saw</button>
-    <button data-v="3">tri</button>
-    <button data-v="4">noise</button>
-    <button data-v="5">pulse</button>
-  </div>
-  <div class="grid">
-    <div class="slider"><label>osc 1 level <span id="v-o1l">1.00</span></label>
-      <input id="p-o1l" type="range" min="0" max="1" step="0.01" value="1"></div>
-    <div class="slider"><label>osc 2 level <span id="v-o2l">0.80</span></label>
-      <input id="p-o2l" type="range" min="0" max="1" step="0.01" value="0.8"></div>
-    <div class="slider"><label>osc 1 pw <span id="v-o1pw">0.50</span></label>
-      <input id="p-o1pw" type="range" min="0.05" max="0.95" step="0.01" value="0.5"></div>
-    <div class="slider"><label>osc 2 pw <span id="v-o2pw">0.50</span></label>
-      <input id="p-o2pw" type="range" min="0.05" max="0.95" step="0.01" value="0.5"></div>
-    <div class="slider"><label>osc 2 semi <span id="v-o2s">0</span></label>
-      <input id="p-o2s" type="range" min="-24" max="24" step="1" value="0"></div>
-    <div class="slider"><label>osc 2 cents <span id="v-o2c">7</span></label>
-      <input id="p-o2c" type="range" min="-50" max="50" step="1" value="7"></div>
-    <div class="slider"><label>osc 1 pan <span id="v-o1pn">0.00</span></label>
-      <input id="p-o1pn" type="range" min="-1" max="1" step="0.02" value="0"></div>
-    <div class="slider"><label>osc 2 pan <span id="v-o2pn">-0.30</span></label>
-      <input id="p-o2pn" type="range" min="-1" max="1" step="0.02" value="-0.3"></div>
+<!-- ======================= TAB 1: SYNTH ======================= -->
+<div class="page active" id="tab-synth">
+  <div class="synth-cols">
+
+    <!-- COLUMN 1: OSCILLATORS 1, 2, 3 -->
+    <div class="col">
+      <div class="sec-hdr">OSCILLATORS</div>
+
+      <div class="grp">
+        <div class="grp-title"><span>OSC 1</span><span>MAIN</span></div>
+        <div class="wf-row" id="w1">
+          <button data-v="0">Sin</button><button data-v="1">Sqr</button>
+          <button data-v="2" class="active">Saw</button><button data-v="3">Tri</button>
+          <button data-v="4">Nse</button><button data-v="5">Pls</button>
+        </div>
+        <div class="srow"><label>Level</label><input id="p-o1l" type="range" min="0" max="1" step="0.01" value="1"><span class="val" id="v-o1l">1.00</span></div>
+        <div class="srow"><label>Pan</label><input id="p-o1pn" type="range" min="-1" max="1" step="0.02" value="0"><span class="val" id="v-o1pn">0.00</span></div>
+        <div class="srow"><label>PW</label><input id="p-o1pw" type="range" min="0.05" max="0.95" step="0.01" value="0.5"><span class="val" id="v-o1pw">0.50</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>OSC 2</span><span>DETUNE</span></div>
+        <div class="wf-row" id="w2">
+          <button data-v="0">Sin</button><button data-v="1">Sqr</button>
+          <button data-v="2" class="active">Saw</button><button data-v="3">Tri</button>
+          <button data-v="4">Nse</button><button data-v="5">Pls</button>
+        </div>
+        <div class="srow"><label>Level</label><input id="p-o2l" type="range" min="0" max="1" step="0.01" value="0.8"><span class="val" id="v-o2l">0.80</span></div>
+        <div class="srow"><label>Semi</label><input id="p-o2s" type="range" min="-24" max="24" step="1" value="0"><span class="val" id="v-o2s">0</span></div>
+        <div class="srow"><label>Cents</label><input id="p-o2c" type="range" min="-50" max="50" step="1" value="7"><span class="val" id="v-o2c">7</span></div>
+        <div class="srow"><label>Pan</label><input id="p-o2pn" type="range" min="-1" max="1" step="0.02" value="-0.3"><span class="val" id="v-o2pn">-0.30</span></div>
+        <div class="srow"><label>PW</label><input id="p-o2pw" type="range" min="0.05" max="0.95" step="0.01" value="0.5"><span class="val" id="v-o2pw">0.50</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>OSC 3</span><span>SUB / HARMONIC</span></div>
+        <div class="wf-row" id="w3">
+          <button data-v="0">Sin</button><button data-v="1" class="active">Sqr</button>
+          <button data-v="2">Saw</button><button data-v="3">Tri</button>
+          <button data-v="4">Nse</button><button data-v="5">Pls</button>
+        </div>
+        <div class="srow"><label>Level</label><input id="p-o3l" type="range" min="0" max="1" step="0.01" value="0.45"><span class="val" id="v-o3l">0.45</span></div>
+        <div class="srow"><label>Semi</label><input id="p-o3s" type="range" min="-24" max="24" step="1" value="-12"><span class="val" id="v-o3s">-12</span></div>
+        <div class="srow"><label>Cents</label><input id="p-o3c" type="range" min="-50" max="50" step="1" value="0"><span class="val" id="v-o3c">0</span></div>
+        <div class="srow"><label>Pan</label><input id="p-o3pn" type="range" min="-1" max="1" step="0.02" value="0.3"><span class="val" id="v-o3pn">0.30</span></div>
+        <div class="srow"><label>PW</label><input id="p-o3pw" type="range" min="0.05" max="0.95" step="0.01" value="0.5"><span class="val" id="v-o3pw">0.50</span></div>
+      </div>
+    </div>
+
+    <!-- COLUMN 2: FILTER & ENVELOPES -->
+    <div class="col">
+      <div class="sec-hdr">FILTER (TPT SVF)</div>
+      <div class="grp">
+        <div class="grp-title"><span>MODE & RESONANCE</span></div>
+        <div class="wf-row" id="fmode">
+          <button data-v="0" class="active">LP</button><button data-v="1">HP</button>
+          <button data-v="2">BP</button><button data-v="3">Notch</button>
+        </div>
+        <div class="srow"><label>Cutoff</label><input id="p-cut" type="range" min="0" max="1" step="0.004" value="0.64"><span class="val" id="v-cut">1.80k</span></div>
+        <div class="srow"><label>Reso</label><input id="p-res" type="range" min="0" max="1" step="0.01" value="0.50"><span class="val" id="v-res">0.50</span></div>
+        <div class="srow"><label>Env Amt</label><input id="p-fenv" type="range" min="-1" max="1" step="0.02" value="0.40"><span class="val" id="v-fenv">0.40</span></div>
+      </div>
+
+      <div class="sec-hdr">ENVELOPES</div>
+      <div class="grp">
+        <div class="grp-title"><span>AMP ADSR</span></div>
+        <div class="srow"><label>Attack</label><input id="p-atk" type="range" min="0.001" max="2.5" step="0.005" value="0.01"><span class="val" id="v-atk">0.01</span></div>
+        <div class="srow"><label>Decay</label><input id="p-dec" type="range" min="0.005" max="2.5" step="0.01" value="0.10"><span class="val" id="v-dec">0.10</span></div>
+        <div class="srow"><label>Sustain</label><input id="p-sus" type="range" min="0" max="1" step="0.01" value="0.70"><span class="val" id="v-sus">0.70</span></div>
+        <div class="srow"><label>Release</label><input id="p-rel" type="range" min="0.005" max="4" step="0.01" value="0.60"><span class="val" id="v-rel">0.60</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>FILTER ADSR</span></div>
+        <div class="srow"><label>Attack</label><input id="p-fatk" type="range" min="0.001" max="2.5" step="0.005" value="0.01"><span class="val" id="v-fatk">0.01</span></div>
+        <div class="srow"><label>Decay</label><input id="p-fdec" type="range" min="0.005" max="2.5" step="0.01" value="0.35"><span class="val" id="v-fdec">0.35</span></div>
+        <div class="srow"><label>Sustain</label><input id="p-fsus" type="range" min="0" max="1" step="0.01" value="0.25"><span class="val" id="v-fsus">0.25</span></div>
+        <div class="srow"><label>Release</label><input id="p-frel" type="range" min="0.005" max="3" step="0.01" value="0.40"><span class="val" id="v-frel">0.40</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>ENV 3 (MOD MATRIX)</span></div>
+        <div class="srow"><label>Attack</label><input id="p-e3a" type="range" min="0.001" max="2.5" step="0.005" value="0.01"><span class="val" id="v-e3a">0.01</span></div>
+        <div class="srow"><label>Decay</label><input id="p-e3d" type="range" min="0.005" max="2.5" step="0.01" value="0.30"><span class="val" id="v-e3d">0.30</span></div>
+        <div class="srow"><label>Sustain</label><input id="p-e3s" type="range" min="0" max="1" step="0.01" value="0.00"><span class="val" id="v-e3s">0.00</span></div>
+        <div class="srow"><label>Release</label><input id="p-e3r" type="range" min="0.005" max="3" step="0.01" value="0.30"><span class="val" id="v-e3r">0.30</span></div>
+      </div>
+    </div>
+
+    <!-- COLUMN 3: LFO 1, LFO 2, VOICE -->
+    <div class="col">
+      <div class="sec-hdr">MODULATORS (LFO)</div>
+      <div class="grp">
+        <div class="grp-title"><span>LFO 1</span><span>PRIMARY</span></div>
+        <div class="wf-row" id="lwf">
+          <button data-v="0" class="active">Sin</button><button data-v="1">Tri</button>
+          <button data-v="2">Sqr</button><button data-v="3">Saw</button><button data-v="4">Rnd</button>
+        </div>
+        <div class="wf-row" id="ldst">
+          <button data-v="0">Off</button><button data-v="1">Pitch</button>
+          <button data-v="2" class="active">Cutoff</button><button data-v="3">Amp</button>
+        </div>
+        <div class="srow"><label>Rate Hz</label><input id="p-lrt" type="range" min="0.05" max="20" step="0.05" value="0.4"><span class="val" id="v-lrt">0.40</span></div>
+        <div class="srow"><label>Depth</label><input id="p-ldep" type="range" min="0" max="1" step="0.01" value="0.2"><span class="val" id="v-ldep">0.20</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>LFO 2</span><span>MATRIX SRC</span></div>
+        <div class="wf-row" id="l2wf">
+          <button data-v="0" class="active">Sin</button><button data-v="1">Tri</button>
+          <button data-v="2">Sqr</button><button data-v="3">Saw</button><button data-v="4">Rnd</button>
+        </div>
+        <div class="srow"><label>Rate Hz</label><input id="p-l2rt" type="range" min="0.05" max="20" step="0.05" value="3.0"><span class="val" id="v-l2rt">3.00</span></div>
+        <div class="srow"><label>Depth</label><input id="p-l2dep" type="range" min="0" max="1" step="0.01" value="0.0"><span class="val" id="v-l2dep">0.00</span></div>
+      </div>
+
+      <div class="sec-hdr">VOICE & PERFORMANCE</div>
+      <div class="grp">
+        <div class="grp-title"><span>GLIDE / STEREO / WHEEL</span></div>
+        <div class="srow"><label>Glide s</label><input id="p-prt" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-prt">0.00</span></div>
+        <div class="srow"><label>Width</label><input id="p-wth" type="range" min="0" max="2" step="0.02" value="1"><span class="val" id="v-wth">1.00</span></div>
+        <div class="srow"><label>ModWhl</label><input id="p-mw" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-mw">0.00</span></div>
+      </div>
+    </div>
+
+    <!-- COLUMN 4: EFFECTS & MASTER -->
+    <div class="col">
+      <div class="sec-hdr">EFFECTS CHAIN</div>
+      <div class="grp">
+        <div class="grp-title"><span>CHORUS</span><span>QUADRATURE</span></div>
+        <div class="srow"><label>Rate</label><input id="p-ch_r" type="range" min="0.1" max="5" step="0.05" value="0.8"><span class="val" id="v-ch_r">0.80</span></div>
+        <div class="srow"><label>Depth</label><input id="p-ch_d" type="range" min="0" max="10" step="0.1" value="3.5"><span class="val" id="v-ch_d">3.50</span></div>
+        <div class="srow"><label>Mix</label><input id="p-ch_m" type="range" min="0" max="0.8" step="0.01" value="0.22"><span class="val" id="v-ch_m">0.22</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>DELAY</span><span>PING-PONG</span></div>
+        <div class="srow"><label>Time s</label><input id="p-dl_t" type="range" min="0.02" max="1.5" step="0.01" value="0.36"><span class="val" id="v-dl_t">0.36</span></div>
+        <div class="srow"><label>Fdbk</label><input id="p-dl_fb" type="range" min="0" max="0.9" step="0.01" value="0.35"><span class="val" id="v-dl_fb">0.35</span></div>
+        <div class="srow"><label>Mix</label><input id="p-dl_m" type="range" min="0" max="0.8" step="0.01" value="0.20"><span class="val" id="v-dl_m">0.20</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-title"><span>REVERB</span><span>SCHROEDER</span></div>
+        <div class="srow"><label>Room</label><input id="p-rv_r" type="range" min="0" max="1" step="0.01" value="0.55"><span class="val" id="v-rv_r">0.55</span></div>
+        <div class="srow"><label>Damp</label><input id="p-rv_d" type="range" min="0" max="1" step="0.01" value="0.45"><span class="val" id="v-rv_d">0.45</span></div>
+        <div class="srow"><label>Mix</label><input id="p-rv_m" type="range" min="0" max="0.8" step="0.01" value="0.20"><span class="val" id="v-rv_m">0.20</span></div>
+      </div>
+
+      <div class="sec-hdr">MASTER OUTPUT</div>
+      <div class="grp">
+        <div class="srow"><label>Volume</label><input id="p-vol" type="range" min="0" max="1" step="0.01" value="0.70"><span class="val" id="v-vol">0.70</span></div>
+      </div>
+    </div>
+
   </div>
 </div>
 
-<div class="panel">
-  <h2>TPT SVF Filter</h2>
-  <div class="row" id="fmode">
-    <button data-v="0" class="active">lowpass</button>
-    <button data-v="1">highpass</button>
-    <button data-v="2">bandpass</button>
-    <button data-v="3">notch</button>
-  </div>
-  <div class="grid">
-    <div class="slider"><label>cutoff Hz <span id="v-cut">1800</span></label>
-      <input id="p-cut" type="range" min="0" max="1" step="0.005" value="0.65"></div>
-    <div class="slider"><label>resonance <span id="v-res">0.50</span></label>
-      <input id="p-res" type="range" min="0" max="1" step="0.01" value="0.50"></div>
-    <div class="slider"><label>env amount <span id="v-fenv">0.40</span></label>
-      <input id="p-fenv" type="range" min="-1" max="1" step="0.02" value="0.40"></div>
-    <div class="slider"><label>f.attack <span id="v-fatk">0.01</span></label>
-      <input id="p-fatk" type="range" min="0.001" max="2" step="0.005" value="0.01"></div>
-    <div class="slider"><label>f.decay <span id="v-fdec">0.35</span></label>
-      <input id="p-fdec" type="range" min="0.005" max="2" step="0.01" value="0.35"></div>
-    <div class="slider"><label>f.sustain <span id="v-fsus">0.25</span></label>
-      <input id="p-fsus" type="range" min="0" max="1" step="0.01" value="0.25"></div>
-    <div class="slider"><label>f.release <span id="v-frel">0.40</span></label>
-      <input id="p-frel" type="range" min="0.005" max="3" step="0.01" value="0.40"></div>
-    <div class="slider"><label>stereo width <span id="v-wth">1.00</span></label>
-      <input id="p-wth" type="range" min="0" max="2" step="0.02" value="1"></div>
+<!-- ======================= TAB 2: ROUTING MATRIX ======================= -->
+<div class="page" id="tab-matrix">
+  <div class="matrix-box">
+    <div class="sec-hdr">MODULATION ROUTING MATRIX (8 ACTIVE SLOTS · CONTROL-RATE)</div>
+    <div id="mrows"></div>
   </div>
 </div>
 
-<div class="panel">
-  <h2>Amp Envelope & LFO</h2>
-  <div class="grid">
-    <div class="slider"><label>attack <span id="v-atk">0.01</span></label>
-      <input id="p-atk" type="range" min="0.001" max="2.5" step="0.005" value="0.01"></div>
-    <div class="slider"><label>decay <span id="v-dec">0.10</span></label>
-      <input id="p-dec" type="range" min="0.005" max="2.5" step="0.01" value="0.10"></div>
-    <div class="slider"><label>sustain <span id="v-sus">0.70</span></label>
-      <input id="p-sus" type="range" min="0" max="1" step="0.01" value="0.70"></div>
-    <div class="slider"><label>release <span id="v-rel">0.60</span></label>
-      <input id="p-rel" type="range" min="0.005" max="4" step="0.01" value="0.60"></div>
-    <div class="slider"><label>glide s <span id="v-prt">0.00</span></label>
-      <input id="p-prt" type="range" min="0" max="1" step="0.01" value="0"></div>
-    <div class="slider"><label>mod wheel <span id="v-mw">0.00</span></label>
-      <input id="p-mw" type="range" min="0" max="1" step="0.01" value="0"></div>
-  </div>
-  <h2>LFO 1</h2>
-  <div class="row" id="ldst">
-    <button data-v="0">off</button>
-    <button data-v="1">pitch</button>
-    <button data-v="2" class="active">cutoff</button>
-    <button data-v="3">amp</button>
-  </div>
-  <div class="row" id="lwf">
-    <button data-v="0" class="active">sine</button>
-    <button data-v="1">tri</button>
-    <button data-v="2">sqr</button>
-    <button data-v="3">saw</button>
-    <button data-v="4">rnd</button>
-  </div>
-  <div class="grid">
-    <div class="slider"><label>lfo rate Hz <span id="v-lrt">0.40</span></label>
-      <input id="p-lrt" type="range" min="0.05" max="20" step="0.05" value="0.4"></div>
-    <div class="slider"><label>lfo depth <span id="v-ldep">0.20</span></label>
-      <input id="p-ldep" type="range" min="0" max="1" step="0.01" value="0.2"></div>
-  </div>
+<!-- ======================= TAB 3: PRESETS ======================= -->
+<div class="page" id="tab-presets">
+  <div class="shelves" id="shelves"></div>
 </div>
 
-<div class="panel">
-  <h2>Stereo FX & Master</h2>
-  <div class="grid">
-    <div class="slider"><label>chorus rate <span id="v-ch_r">0.80</span></label>
-      <input id="p-ch_r" type="range" min="0.1" max="5" step="0.05" value="0.8"></div>
-    <div class="slider"><label>chorus depth <span id="v-ch_d">3.50</span></label>
-      <input id="p-ch_d" type="range" min="0" max="10" step="0.1" value="3.5"></div>
-    <div class="slider"><label>chorus mix <span id="v-ch_m">0.22</span></label>
-      <input id="p-ch_m" type="range" min="0" max="0.8" step="0.01" value="0.22"></div>
-    <div class="slider"><label>delay time s <span id="v-dl_t">0.36</span></label>
-      <input id="p-dl_t" type="range" min="0.02" max="1.5" step="0.01" value="0.36"></div>
-    <div class="slider"><label>delay fb <span id="v-dl_fb">0.35</span></label>
-      <input id="p-dl_fb" type="range" min="0" max="0.9" step="0.01" value="0.35"></div>
-    <div class="slider"><label>delay mix <span id="v-dl_m">0.20</span></label>
-      <input id="p-dl_m" type="range" min="0" max="0.8" step="0.01" value="0.20"></div>
-    <div class="slider"><label>reverb room <span id="v-rv_r">0.55</span></label>
-      <input id="p-rv_r" type="range" min="0" max="1" step="0.01" value="0.55"></div>
-    <div class="slider"><label>reverb damp <span id="v-rv_d">0.45</span></label>
-      <input id="p-rv_d" type="range" min="0" max="1" step="0.01" value="0.45"></div>
-    <div class="slider"><label>reverb mix <span id="v-rv_m">0.20</span></label>
-      <input id="p-rv_m" type="range" min="0" max="0.8" step="0.01" value="0.20"></div>
-    <div class="slider"><label>master vol <span id="v-vol">0.70</span></label>
-      <input id="p-vol" type="range" min="0" max="1" step="0.01" value="0.70"></div>
+<!-- ======================= PERSISTENT KEYBOARD ======================= -->
+<div class="kbd-bar">
+  <div class="kbd-top">
+    <div style="display:flex;gap:6px;align-items:center">
+      <button id="octdown">OCT −</button>
+      <span id="octval" style="font:11px monospace;color:var(--gold)">OCTAVE 4 · KEYS Z..M / Q..I</span>
+      <button id="octup">OCT +</button>
+    </div>
+    <span style="font:10px monospace;color:var(--logo-red-light)">6-VOICE POLY · 3× POLYBLEP OSC · TPT SVF · BUS LIMITER</span>
   </div>
+  <div id="keys"></div>
 </div>
-
-</div><!-- /.deck -->
-
-<div class="panel wide oct">
-  <button id="octdown">−</button>
-  <div id="octval">octave 4 · keys Z..M / Q..I</div>
-  <button id="octup">+</button>
-</div>
-
-<div id="keys"></div>
 
 <script>
+// Tab switching
+document.querySelectorAll('.tabs button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById('tab-' + b.dataset.tab).classList.add('active');
+  });
+});
+
 const statusEl = document.getElementById('status');
 let inflight = 0, queued = null;
 function cmd(q) {
   if (inflight > 2) { queued = q; return; }
   inflight++;
   fetch('/cmd?' + q).then(() => {
-    statusEl.textContent = 'connected'; statusEl.className = '';
+    statusEl.textContent = 'ONLINE'; statusEl.className = '';
   }).catch(() => {
-    statusEl.textContent = 'offline'; statusEl.className = 'off';
+    statusEl.textContent = 'OFFLINE'; statusEl.className = 'off';
   }).finally(() => {
     inflight--;
     if (queued) { const n = queued; queued = null; cmd(n); }
   });
 }
 
-// Log-scale cutoff helper: slider 0..1 <-> 25..20000 Hz
 const cutToHz = t => Math.round(25 * Math.pow(800, t));
 const hzToCut = hz => Math.log(Math.max(25, Math.min(20000, hz)) / 25) / Math.log(800);
+const fmtHz = v => v >= 1000 ? (v / 1000).toFixed(2) + 'k' : Math.round(v) + '';
 
 function bindSlider(id, key, xform) {
   const el = document.getElementById('p-' + id);
   const lb = document.getElementById('v-' + id);
+  if (!el || !lb) return;
   el.addEventListener('input', () => {
     const raw = parseFloat(el.value);
     const val = xform ? xform(raw) : raw;
-    lb.textContent = id === 'cut' ? val : (el.step.includes('.') ? val.toFixed(2) : val);
+    lb.textContent = id === 'cut' ? fmtHz(val) : (el.step.includes('.') ? val.toFixed(2) : val);
     cmd(`k=${key}&v=${val}`);
   });
 }
 
-bindSlider('o1l', 'o1l'); bindSlider('o2l', 'o2l');
-bindSlider('o1pw', 'o1pw'); bindSlider('o2pw', 'o2pw');
-bindSlider('o2s', 'o2s'); bindSlider('o2c', 'o2c');
-bindSlider('o1pn', 'o1pn'); bindSlider('o2pn', 'o2pn');
+['o1l','o1pn','o1pw','o2l','o2s','o2c','o2pn','o2pw','o3l','o3s','o3c','o3pn','o3pw',
+ 'res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
+ 'e3a','e3d','e3s','e3r','mw','lrt','ldep','l2rt','l2dep',
+ 'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol'].forEach(id => bindSlider(id, id));
 bindSlider('cut', 'cut', cutToHz);
-bindSlider('res', 'res'); bindSlider('fenv', 'fenv');
-bindSlider('fatk', 'fatk'); bindSlider('fdec', 'fdec');
-bindSlider('fsus', 'fsus'); bindSlider('frel', 'frel');
-bindSlider('wth', 'wth');
-bindSlider('atk', 'atk'); bindSlider('dec', 'dec');
-bindSlider('sus', 'sus'); bindSlider('rel', 'rel');
-bindSlider('prt', 'prt'); bindSlider('mw', 'mw');
-bindSlider('lrt', 'lrt'); bindSlider('ldep', 'ldep');
-bindSlider('ch_r', 'ch_r'); bindSlider('ch_d', 'ch_d'); bindSlider('ch_m', 'ch_m');
-bindSlider('dl_t', 'dl_t'); bindSlider('dl_fb', 'dl_fb'); bindSlider('dl_m', 'dl_m');
-bindSlider('rv_r', 'rv_r'); bindSlider('rv_d', 'rv_d'); bindSlider('rv_m', 'rv_m');
-bindSlider('vol', 'vol');
 
 function bindGroup(id, key) {
   document.querySelectorAll('#' + id + ' button').forEach(b => {
@@ -263,9 +484,9 @@ function bindGroup(id, key) {
     });
   });
 }
-bindGroup('w1', 'o1w'); bindGroup('w2', 'o2w');
+bindGroup('w1', 'o1w'); bindGroup('w2', 'o2w'); bindGroup('w3', 'o3w');
 bindGroup('fmode', 'fmode');
-bindGroup('ldst', 'ldst'); bindGroup('lwf', 'lwf');
+bindGroup('ldst', 'ldst'); bindGroup('lwf', 'lwf'); bindGroup('l2wf', 'l2wf');
 
 function setGroup(id, v) {
   document.querySelectorAll('#' + id + ' button').forEach(b =>
@@ -274,65 +495,93 @@ function setGroup(id, v) {
 function setVal(id, v) {
   const el = document.getElementById('p-' + id);
   const lb = document.getElementById('v-' + id);
-  if (!el || !lb) return;
-  if (id === 'cut') { el.value = hzToCut(v); lb.textContent = Math.round(v); }
+  if (!el || !lb || v === undefined) return;
+  if (id === 'cut') { el.value = hzToCut(v); lb.textContent = fmtHz(v); }
   else { el.value = v; lb.textContent = el.step.includes('.') ? (+v).toFixed(2) : Math.round(v); }
 }
 
-// Preset browser
-let allPresets = [], curCat = 'All';
-const psel = document.getElementById('psel');
-const catsEl = document.getElementById('cats');
-
-function renderPresets(selectIdx) {
-  const list = curCat === 'All' ? allPresets : allPresets.filter(p => p.c === curCat);
-  psel.innerHTML = list.map(p => `<option value="${p.i}">[${p.i}] ${p.n} (${p.c})</option>`).join('');
-  if (selectIdx !== undefined) psel.value = selectIdx;
+// Build 8-slot Routing Matrix UI
+const SRCS = ['Off','LFO 1','LFO 2','Amp Env','Filter Env','Env 3','Velocity','Key Track','Mod Wheel','Aftertouch','Pitch Bend','Constant','LFO 3','Env 4'];
+const DSTS = ['Off','Pitch (all)','Cutoff','Resonance','Amplitude','Osc 1 Pitch','Osc 2 Pitch','Osc 3 Pitch','Osc 1 Level','Osc 2 Level','Osc 3 Level','Osc 1 Pan','Osc 2 Pan','Osc 3 Pan','Osc 1 PW','Osc 2 PW','Osc 3 PW','LFO 1 Rate'];
+const mrowsEl = document.getElementById('mrows');
+for (let i = 0; i < 8; i++) {
+  const row = document.createElement('div');
+  row.className = 'mrow';
+  row.innerHTML = `
+    <label class="slot-lbl"><input type="checkbox" id="m-en-${i}"> #${i+1}</label>
+    <select id="m-src-${i}">${SRCS.map((s,idx)=>`<option value="${idx}">${s}</option>`).join('')}</select>
+    <span class="arrow">→</span>
+    <select id="m-dst-${i}">${DSTS.map((d,idx)=>`<option value="${idx}">${d}</option>`).join('')}</select>
+    <input type="range" id="m-amt-${i}" min="-1" max="1" step="0.02" value="0">
+    <span class="val" id="m-val-${i}">0.00</span>
+  `;
+  mrowsEl.appendChild(row);
+  const sendSlot = () => {
+    const en = document.getElementById(`m-en-${i}`).checked ? 1 : 0;
+    const src = document.getElementById(`m-src-${i}`).value;
+    const dst = document.getElementById(`m-dst-${i}`).value;
+    const amt = parseFloat(document.getElementById(`m-amt-${i}`).value);
+    document.getElementById(`m-val-${i}`).textContent = amt.toFixed(2);
+    cmd(`k=mslot&s=${i}&en=${en}&src=${src}&dst=${dst}&amt=${amt}`);
+  };
+  ['en','src','dst','amt'].forEach(k =>
+    document.getElementById(`m-${k}-${i}`).addEventListener('input', sendSlot));
 }
 
+// Presets + Shelves
+let allPresets = [], curPreset = 0;
+const psel = document.getElementById('psel');
+const shelvesEl = document.getElementById('shelves');
+
 function loadPreset(idx) {
+  curPreset = idx;
+  psel.value = idx;
+  document.querySelectorAll('.shelf-list button').forEach(b =>
+    b.classList.toggle('active', +b.dataset.i === idx));
   fetch('/preset?i=' + idx).then(r => r.json()).then(s => {
-    setGroup('w1', s.o1w); setGroup('w2', s.o2w);
-    setVal('o1l', s.o1l); setVal('o2l', s.o2l);
-    setVal('o1pw', s.o1pw); setVal('o2pw', s.o2pw);
-    setVal('o2s', s.o2s); setVal('o2c', s.o2c);
-    setVal('o1pn', s.o1pn); setVal('o2pn', s.o2pn);
-    setVal('cut', s.cut); setVal('res', s.res);
-    setVal('fenv', s.fenv); setVal('fatk', s.fatk);
-    setVal('fdec', s.fdec); setVal('fsus', s.fsus); setVal('frel', s.frel);
-    setVal('wth', s.wth);
-    setVal('atk', s.atk); setVal('dec', s.dec);
-    setVal('sus', s.sus); setVal('rel', s.rel); setVal('prt', s.prt);
-    setGroup('ldst', s.ldst); setGroup('lwf', s.lwf);
-    setVal('lrt', s.lrt); setVal('ldep', s.ldep);
-    setVal('ch_r', s.ch_r); setVal('ch_d', s.ch_d); setVal('ch_m', s.ch_m);
-    setVal('dl_t', s.dl_t); setVal('dl_fb', s.dl_fb); setVal('dl_m', s.dl_m);
-    setVal('rv_r', s.rv_r); setVal('rv_d', s.rv_d); setVal('rv_m', s.rv_m);
-    setVal('vol', s.vol);
+    setGroup('w1', s.o1w); setGroup('w2', s.o2w); setGroup('w3', s.o3w);
+    ['o1l','o2l','o3l','o1pw','o2pw','o3pw','o2s','o2c','o3s','o3c','o1pn','o2pn','o3pn',
+     'cut','res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
+     'e3a','e3d','e3s','e3r','lrt','ldep','l2rt','l2dep',
+     'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol'].forEach(k => setVal(k, s[k]));
+    setGroup('ldst', s.ldst); setGroup('lwf', s.lwf); setGroup('l2wf', s.l2wf);
+    if (s.m) {
+      s.m.forEach((slot, i) => {
+        if (i >= 8) return;
+        document.getElementById(`m-en-${i}`).checked = !!slot[0];
+        document.getElementById(`m-src-${i}`).value = slot[1];
+        document.getElementById(`m-dst-${i}`).value = slot[2];
+        document.getElementById(`m-amt-${i}`).value = slot[3];
+        document.getElementById(`m-val-${i}`).textContent = (+slot[3]).toFixed(2);
+      });
+    }
   });
 }
 
 fetch('/presets').then(r => r.json()).then(list => {
   allPresets = list;
-  const cats = ['All', ...new Set(list.map(p => p.c))];
-  catsEl.innerHTML = cats.map(c => `<button data-c="${c}" class="${c==='All'?'active':''}">${c}</button>`).join('');
-  catsEl.querySelectorAll('button').forEach(b => {
-    b.addEventListener('click', () => {
-      catsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
-      b.classList.add('active');
-      curCat = b.dataset.c;
-      renderPresets();
-    });
+  psel.innerHTML = list.map(p => `<option value="${p.i}">[${p.i}] ${p.n} (${p.c})</option>`).join('');
+  const cats = [...new Set(list.map(p => p.c))];
+  shelvesEl.innerHTML = cats.map(c => {
+    const items = list.filter(p => p.c === c);
+    return `<div class="shelf">
+      <div class="shelf-hdr"><span>${c}</span><span>${items.length}</span></div>
+      <div class="shelf-list">
+        ${items.map(p => `<button data-i="${p.i}">${p.n}</button>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+  shelvesEl.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', () => loadPreset(+b.dataset.i));
   });
-  renderPresets(0);
 });
 
 psel.addEventListener('change', () => loadPreset(+psel.value));
 document.getElementById('pprev').addEventListener('click', () => {
-  if (psel.selectedIndex > 0) { psel.selectedIndex--; loadPreset(+psel.value); }
+  if (psel.selectedIndex > 0) loadPreset(+psel.options[psel.selectedIndex - 1].value);
 });
 document.getElementById('pnext').addEventListener('click', () => {
-  if (psel.selectedIndex < psel.options.length - 1) { psel.selectedIndex++; loadPreset(+psel.value); }
+  if (psel.selectedIndex < psel.options.length - 1) loadPreset(+psel.options[psel.selectedIndex + 1].value);
 });
 
 // 2-octave keyboard (25 keys)
@@ -366,14 +615,12 @@ function noteOn(el) {
   if (activeKey) noteOff(activeKey);
   activeKey = el;
   el.classList.add('down');
-  const n = oct * 12 + 12 + (+el.dataset.off);
-  cmd(`k=on&v=${n}`);
+  cmd(`k=on&v=${oct * 12 + 12 + (+el.dataset.off)}`);
 }
 function noteOff(el) {
   if (!el) return;
   el.classList.remove('down');
-  const n = oct * 12 + 12 + (+el.dataset.off);
-  cmd(`k=off&v=${n}`);
+  cmd(`k=off&v=${oct * 12 + 12 + (+el.dataset.off)}`);
   if (activeKey === el) activeKey = null;
 }
 
@@ -391,10 +638,10 @@ keysEl.addEventListener('pointerup', () => noteOff(activeKey));
 keysEl.addEventListener('pointercancel', () => noteOff(activeKey));
 
 document.getElementById('octdown').onclick = () => {
-  if (oct > 1) { oct--; document.getElementById('octval').textContent = `octave ${oct} · keys Z..M / Q..I`; }
+  if (oct > 1) { oct--; document.getElementById('octval').textContent = `OCTAVE ${oct} · KEYS Z..M / Q..I`; }
 };
 document.getElementById('octup').onclick = () => {
-  if (oct < 6) { oct++; document.getElementById('octval').textContent = `octave ${oct} · keys Z..M / Q..I`; }
+  if (oct < 6) { oct++; document.getElementById('octval').textContent = `OCTAVE ${oct} · KEYS Z..M / Q..I`; }
 };
 
 const keyMap = {KeyZ:0,KeyS:1,KeyX:2,KeyD:3,KeyC:4,KeyV:5,KeyG:6,KeyB:7,KeyH:8,KeyN:9,KeyJ:10,KeyM:11,Comma:12,

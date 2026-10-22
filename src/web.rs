@@ -1,9 +1,9 @@
 //! Wi-Fi SoftAP + HTTP control server on Core 0.
 //!
-//! Brings up open SoftAP `rinsynth-esp32` (192.168.4.1) and serves the
+//! Brings up open SoftAP `rinsynth-esp32` (192.168.71.1) and serves the
 //! single-page synth controller UI (`index.html`), the 85-preset factory
 //! bank list (`/presets`), preset loader (`/preset?i=N`), and real-time
-//! parameter/note endpoints (`/cmd?k=...&v=...`).
+//! parameter/mod-matrix/note endpoints (`/cmd?k=...`).
 //!
 //! All HTTP handling runs on Core 0 and communicates with the Core 1 audio
 //! render loop exclusively through lock-free SPSC rings.
@@ -24,6 +24,8 @@ use log::info;
 use rinsynth_dsp::embedded::EmbeddedEngine;
 use rinsynth_dsp::FilterMode;
 use rinsynth_model::event::SynthEvent;
+use rinsynth_model::lfo::LfoWaveform;
+use rinsynth_model::mod_matrix::{ModDest, ModSlot, ModSource};
 use rinsynth_model::params::SynthParam;
 use rinsynth_model::presets::Preset;
 use std::sync::OnceLock;
@@ -40,6 +42,14 @@ pub enum WebCmd {
     Param(SynthParam, f32),
     FilterMode(u8),
     ModWheel(f32),
+    Lfo2Rate(f32),
+    Lfo2Depth(f32),
+    Lfo2Wf(u8),
+    Env3Attack(f32),
+    Env3Decay(f32),
+    Env3Sustain(f32),
+    Env3Release(f32),
+    ModSlot(u8, ModSlot),
     ChorusRate(f32),
     ChorusDepth(f32),
     ChorusMix(f32),
@@ -98,6 +108,52 @@ pub fn pop_cmd() -> Option<WebCmd> {
     CMD_RING.pop()
 }
 
+const MOD_SOURCES: [ModSource; 14] = [
+    ModSource::Off,
+    ModSource::Lfo1,
+    ModSource::Lfo2,
+    ModSource::AmpEnv,
+    ModSource::FilterEnv,
+    ModSource::Env3,
+    ModSource::Velocity,
+    ModSource::KeyTrack,
+    ModSource::ModWheel,
+    ModSource::Aftertouch,
+    ModSource::PitchBend,
+    ModSource::Constant,
+    ModSource::Lfo3,
+    ModSource::Env4,
+];
+
+const MOD_DESTS: [ModDest; 18] = [
+    ModDest::Off,
+    ModDest::AllPitch,
+    ModDest::FilterCutoff,
+    ModDest::FilterResonance,
+    ModDest::Amplitude,
+    ModDest::Osc1Pitch,
+    ModDest::Osc2Pitch,
+    ModDest::Osc3Pitch,
+    ModDest::Osc1Level,
+    ModDest::Osc2Level,
+    ModDest::Osc3Level,
+    ModDest::Osc1Pan,
+    ModDest::Osc2Pan,
+    ModDest::Osc3Pan,
+    ModDest::Osc1Pw,
+    ModDest::Osc2Pw,
+    ModDest::Osc3Pw,
+    ModDest::Lfo1Rate,
+];
+
+fn src_to_idx(s: ModSource) -> usize {
+    MOD_SOURCES.iter().position(|&x| x == s).unwrap_or(0)
+}
+
+fn dst_to_idx(d: ModDest) -> usize {
+    MOD_DESTS.iter().position(|&x| x == d).unwrap_or(0)
+}
+
 pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
     match cmd {
         WebCmd::Nop => {}
@@ -112,6 +168,23 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
             vm.set_filter_mode(mode);
         }
         WebCmd::ModWheel(v) => vm.set_mod_wheel(v),
+        WebCmd::Lfo2Rate(v) => vm.set_lfo2_rate(v),
+        WebCmd::Lfo2Depth(v) => vm.set_lfo2_depth(v),
+        WebCmd::Lfo2Wf(w) => {
+            let wf = match w {
+                0 => LfoWaveform::Sine,
+                1 => LfoWaveform::Triangle,
+                2 => LfoWaveform::Square,
+                3 => LfoWaveform::Saw,
+                _ => LfoWaveform::Random,
+            };
+            vm.set_lfo2_waveform(wf);
+        }
+        WebCmd::Env3Attack(v) => vm.set_env3_attack(v),
+        WebCmd::Env3Decay(v) => vm.set_env3_decay(v),
+        WebCmd::Env3Sustain(v) => vm.set_env3_sustain(v),
+        WebCmd::Env3Release(v) => vm.set_env3_release(v),
+        WebCmd::ModSlot(idx, slot) => vm.set_mod_slot(idx as usize, slot),
         WebCmd::ChorusRate(v) => vm.effects.set_chorus_rate(v),
         WebCmd::ChorusDepth(v) => vm.effects.set_chorus_depth(v),
         WebCmd::ChorusMix(v) => {
@@ -134,33 +207,60 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
 }
 
 fn preset_to_ui_json(p: &Preset) -> String {
+    let mut m_json = String::with_capacity(256);
+    m_json.push('[');
+    for i in 0..8 {
+        if i > 0 {
+            m_json.push(',');
+        }
+        let s = &p.mod_matrix.slots[i];
+        m_json.push_str(&format!(
+            "[{},{},{},{:.2}]",
+            if s.enabled { 1 } else { 0 },
+            src_to_idx(s.source),
+            dst_to_idx(s.dest),
+            s.amount
+        ));
+    }
+    m_json.push(']');
+
     format!(
         concat!(
             "{{",
-            "\"o1w\":{},\"o2w\":{},\"o1l\":{:.3},\"o2l\":{:.3},",
-            "\"o1pw\":{:.3},\"o2pw\":{:.3},\"o2s\":{},\"o2c\":{},",
-            "\"o1pn\":{:.3},\"o2pn\":{:.3},",
+            "\"o1w\":{},\"o2w\":{},\"o3w\":{},",
+            "\"o1l\":{:.3},\"o2l\":{:.3},\"o3l\":{:.3},",
+            "\"o1pw\":{:.3},\"o2pw\":{:.3},\"o3pw\":{:.3},",
+            "\"o2s\":{},\"o2c\":{},\"o3s\":{},\"o3c\":{},",
+            "\"o1pn\":{:.3},\"o2pn\":{:.3},\"o3pn\":{:.3},",
             "\"cut\":{:.1},\"res\":{:.3},\"fenv\":{:.3},",
             "\"fatk\":{:.3},\"fdec\":{:.3},\"fsus\":{:.3},\"frel\":{:.3},",
             "\"wth\":{:.3},",
             "\"atk\":{:.3},\"dec\":{:.3},\"sus\":{:.3},\"rel\":{:.3},\"prt\":{:.3},",
+            "\"e3a\":{:.3},\"e3d\":{:.3},\"e3s\":{:.3},\"e3r\":{:.3},",
             "\"ldst\":{},\"lwf\":{},\"lrt\":{:.3},\"ldep\":{:.3},",
+            "\"l2wf\":{},\"l2rt\":{:.3},\"l2dep\":{:.3},",
             "\"ch_r\":{:.3},\"ch_d\":{:.3},\"ch_m\":{:.3},",
             "\"dl_t\":{:.3},\"dl_fb\":{:.3},\"dl_m\":{:.3},",
             "\"rv_r\":{:.3},\"rv_d\":{:.3},\"rv_m\":{:.3},",
-            "\"vol\":{:.3}",
+            "\"vol\":{:.3},\"m\":{}",
             "}}"
         ),
         p.osc1_waveform as u8,
         p.osc2_waveform as u8,
+        p.osc3_waveform as u8,
         p.osc1_level,
         p.osc2_level,
+        p.osc3_level,
         p.osc1_pw,
         p.osc2_pw,
+        p.osc3_pw,
         p.osc2_semitones,
         p.osc2_cents,
+        p.osc3_semitones,
+        p.osc3_cents,
         p.osc1_pan,
         p.osc2_pan,
+        p.osc3_pan,
         p.filter_cutoff,
         p.filter_resonance,
         p.filter_env_amount,
@@ -174,10 +274,17 @@ fn preset_to_ui_json(p: &Preset) -> String {
         p.amp_sustain,
         p.amp_release,
         p.portamento_time,
+        p.env3_attack,
+        p.env3_decay,
+        p.env3_sustain,
+        p.env3_release,
         p.lfo_destination as u8,
         p.lfo_waveform as u8,
         p.lfo_rate,
         p.lfo_depth,
+        p.lfo2_waveform as u8,
+        p.lfo2_rate,
+        p.lfo2_depth,
         p.chorus_rate,
         p.chorus_depth,
         if p.chorus_enabled { p.chorus_mix } else { 0.0 },
@@ -188,20 +295,41 @@ fn preset_to_ui_json(p: &Preset) -> String {
         p.reverb_damping,
         if p.reverb_enabled { p.reverb_mix } else { 0.0 },
         p.master_volume,
+        m_json,
     )
 }
 
 fn handle_query(q: &str) {
     let mut key = "";
     let mut val = "";
+    let mut slot_idx = 0u8;
+    let mut slot_en = false;
+    let mut slot_src = 0usize;
+    let mut slot_dst = 0usize;
+    let mut slot_amt = 0.0f32;
     for pair in q.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
             match k {
                 "k" => key = v,
                 "v" => val = v,
+                "s" => slot_idx = v.parse().unwrap_or(0),
+                "en" => slot_en = v == "1",
+                "src" => slot_src = v.parse().unwrap_or(0),
+                "dst" => slot_dst = v.parse().unwrap_or(0),
+                "amt" => slot_amt = v.parse().unwrap_or(0.0),
                 _ => {}
             }
         }
+    }
+    if key == "mslot" {
+        let slot = ModSlot {
+            enabled: slot_en,
+            source: *MOD_SOURCES.get(slot_src).unwrap_or(&ModSource::Off),
+            dest: *MOD_DESTS.get(slot_dst).unwrap_or(&ModDest::Off),
+            amount: slot_amt.clamp(-1.0, 1.0),
+        };
+        CMD_RING.push(WebCmd::ModSlot(slot_idx, slot));
+        return;
     }
     let Ok(v) = val.parse::<f32>() else { return };
     match key {
@@ -209,14 +337,20 @@ fn handle_query(q: &str) {
         "off" => usb_midi::push_event(SynthEvent::note_off(v as u8)),
         "o1w" => CMD_RING.push(WebCmd::Param(SynthParam::Osc1Waveform, v)),
         "o2w" => CMD_RING.push(WebCmd::Param(SynthParam::Osc2Waveform, v)),
+        "o3w" => CMD_RING.push(WebCmd::Param(SynthParam::Osc3Waveform, v)),
         "o1l" => CMD_RING.push(WebCmd::Param(SynthParam::Osc1Level, v)),
         "o2l" => CMD_RING.push(WebCmd::Param(SynthParam::Osc2Level, v)),
+        "o3l" => CMD_RING.push(WebCmd::Param(SynthParam::Osc3Level, v)),
         "o1pw" => CMD_RING.push(WebCmd::Param(SynthParam::Osc1Pw, v)),
         "o2pw" => CMD_RING.push(WebCmd::Param(SynthParam::Osc2Pw, v)),
+        "o3pw" => CMD_RING.push(WebCmd::Param(SynthParam::Osc3Pw, v)),
         "o2s" => CMD_RING.push(WebCmd::Param(SynthParam::Osc2Semitones, v)),
         "o2c" => CMD_RING.push(WebCmd::Param(SynthParam::Osc2Cents, v)),
+        "o3s" => CMD_RING.push(WebCmd::Param(SynthParam::Osc3Semitones, v)),
+        "o3c" => CMD_RING.push(WebCmd::Param(SynthParam::Osc3Cents, v)),
         "o1pn" => CMD_RING.push(WebCmd::Param(SynthParam::Osc1Pan, v)),
         "o2pn" => CMD_RING.push(WebCmd::Param(SynthParam::Osc2Pan, v)),
+        "o3pn" => CMD_RING.push(WebCmd::Param(SynthParam::Osc3Pan, v)),
         "fmode" => CMD_RING.push(WebCmd::FilterMode(v as u8)),
         "cut" => CMD_RING.push(WebCmd::Param(SynthParam::FilterCutoff, v)),
         "res" => CMD_RING.push(WebCmd::Param(SynthParam::FilterResonance, v)),
@@ -231,11 +365,18 @@ fn handle_query(q: &str) {
         "sus" => CMD_RING.push(WebCmd::Param(SynthParam::Sustain, v)),
         "rel" => CMD_RING.push(WebCmd::Param(SynthParam::Release, v)),
         "prt" => CMD_RING.push(WebCmd::Param(SynthParam::PortamentoTime, v)),
+        "e3a" => CMD_RING.push(WebCmd::Env3Attack(v)),
+        "e3d" => CMD_RING.push(WebCmd::Env3Decay(v)),
+        "e3s" => CMD_RING.push(WebCmd::Env3Sustain(v)),
+        "e3r" => CMD_RING.push(WebCmd::Env3Release(v)),
         "mw" => CMD_RING.push(WebCmd::ModWheel(v)),
         "ldst" => CMD_RING.push(WebCmd::Param(SynthParam::LfoDestination, v)),
         "lwf" => CMD_RING.push(WebCmd::Param(SynthParam::LfoWaveform, v)),
         "lrt" => CMD_RING.push(WebCmd::Param(SynthParam::LfoRate, v)),
         "ldep" => CMD_RING.push(WebCmd::Param(SynthParam::LfoDepth, v)),
+        "l2wf" => CMD_RING.push(WebCmd::Lfo2Wf(v as u8)),
+        "l2rt" => CMD_RING.push(WebCmd::Lfo2Rate(v)),
+        "l2dep" => CMD_RING.push(WebCmd::Lfo2Depth(v)),
         "ch_r" => CMD_RING.push(WebCmd::ChorusRate(v)),
         "ch_d" => CMD_RING.push(WebCmd::ChorusDepth(v)),
         "ch_m" => CMD_RING.push(WebCmd::ChorusMix(v)),

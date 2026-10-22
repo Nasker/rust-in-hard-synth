@@ -132,9 +132,8 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
 
     let free0 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     info!("engine: free heap before vm = {}", free0);
-    // Lean concrete engine — fixed pipeline, no dyn dispatch. Target is
-    // ~700 cyc/voice-sample: 8 voices at full 44.1 kHz inside deadline.
-    let mut vm = EmbeddedEngine::new(8, SYNTH_RATE);
+    // Lean concrete engine — 6 voices × 3 PolyBLEP oscs + TPT SVF + ModMatrix + FX.
+    let mut vm = EmbeddedEngine::new(6, SYNTH_RATE);
     let free1 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
     info!("engine: free heap after vm = {} (-{} bytes)", free1, free0 - free1);
     info!(
@@ -159,7 +158,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     preset.lfo_rate = 0.4;
     preset.lfo_depth = 0.20;
     preset.amp_release = 0.6;
-    preset.osc3_level = 0.0;
+    preset.osc3_level = 0.45; // 3rd oscillator: -12 st sub-square active!
     // Enable lush stereo FX chain (Chorus -> Ping-Pong Delay -> Reverb)
     preset.chorus_enabled = true;
     preset.chorus_rate = 0.8;
