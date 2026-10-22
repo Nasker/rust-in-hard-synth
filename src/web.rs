@@ -13,13 +13,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use esp_idf_hal::cpu::Core;
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
+use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer, KeepAlive};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, Configuration as WifiConfig, EspWifi,
 };
+use esp_idf_svc::ws::FrameType;
 use log::info;
 use rinsynth_dsp::embedded::EmbeddedEngine;
 use rinsynth_dsp::FilterMode;
@@ -423,18 +424,29 @@ pub fn start(modem: Modem<'static>, bank: &[Preset]) -> anyhow::Result<()> {
         ..Default::default()
     }))?;
     wifi.start()?;
+    // Critical for real-time Web UI: disable Wi-Fi modem power-save sleep so
+    // packets aren't buffered for 100-300 ms between beacon intervals.
+    unsafe {
+        esp_idf_sys::esp_wifi_set_ps(esp_idf_sys::wifi_ps_type_t_WIFI_PS_NONE);
+    }
     Box::leak(wifi);
 
     let http_cfg = HttpConfig {
         core: Some(Core::Core0),
-        max_open_sockets: 5,
-        stack_size: 8192,
+        max_open_sockets: 7,
+        stack_size: 10240,
+        lru_purge_enable: true,
+        keep_alive: Some(KeepAlive {
+            idle_secs: 15,
+            interval_secs: 5,
+            probe_count: 3,
+        }),
         ..Default::default()
     };
     let mut server = Box::new(EspHttpServer::new(&http_cfg)?);
 
     server.fn_handler("/", Method::Get, |req| -> anyhow::Result<()> {
-        let mut resp = req.into_ok_response()?;
+        let mut resp = req.into_response(200, Some("OK"), &[("Content-Type", "text/html; charset=utf-8")])?;
         resp.write_all(INDEX_HTML.as_bytes())?;
         Ok(())
     })?;
@@ -470,6 +482,29 @@ pub fn start(modem: Modem<'static>, bank: &[Preset]) -> anyhow::Result<()> {
         }
         let mut resp = req.into_ok_response()?;
         resp.write_all(b"ok")?;
+        Ok(())
+    })?;
+
+    server.ws_handler("/ws", None, |ws| -> anyhow::Result<()> {
+        if ws.is_new() || ws.is_closed() {
+            return Ok(());
+        }
+        let mut buf = [0u8; 256];
+        let (frame_type, len) = ws.recv(&mut buf)?;
+        if let FrameType::Text(_) = frame_type {
+            let n = len.saturating_sub(1).min(buf.len());
+            if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
+                if let Some(rest) = msg.strip_prefix("preset:") {
+                    let idx = rest.trim().parse::<usize>().unwrap_or(0);
+                    usb_midi::set_program_change(idx as u8);
+                    if let Some(body) = PRESET_DETAILS_JSON.get().and_then(|v| v.get(idx)) {
+                        ws.send(FrameType::Text(false), body.as_bytes())?;
+                    }
+                } else {
+                    handle_query(msg);
+                }
+            }
+        }
         Ok(())
     })?;
 

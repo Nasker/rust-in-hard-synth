@@ -439,18 +439,26 @@ document.querySelectorAll('.tabs button').forEach(b => {
 });
 
 const statusEl = document.getElementById('status');
-let inflight = 0, queued = null;
+let ws = null;
+function connectWs() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { statusEl.textContent = 'WS ONLINE'; statusEl.className = ''; };
+  ws.onmessage = e => {
+    try { applyPresetObj(JSON.parse(e.data)); } catch (_) {}
+  };
+  ws.onclose = () => {
+    statusEl.textContent = 'RECONNECTING'; statusEl.className = 'off';
+    setTimeout(connectWs, 1200);
+  };
+}
+connectWs();
+
 function cmd(q) {
-  if (inflight > 2) { queued = q; return; }
-  inflight++;
-  fetch('/cmd?' + q).then(() => {
-    statusEl.textContent = 'ONLINE'; statusEl.className = '';
-  }).catch(() => {
-    statusEl.textContent = 'OFFLINE'; statusEl.className = 'off';
-  }).finally(() => {
-    inflight--;
-    if (queued) { const n = queued; queued = null; cmd(n); }
-  });
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(q);
+  } else {
+    fetch('/cmd?' + q).catch(() => {});
+  }
 }
 
 const cutToHz = t => Math.round(25 * Math.pow(800, t));
@@ -533,29 +541,35 @@ let allPresets = [], curPreset = 0;
 const psel = document.getElementById('psel');
 const shelvesEl = document.getElementById('shelves');
 
+function applyPresetObj(s) {
+  setGroup('w1', s.o1w); setGroup('w2', s.o2w); setGroup('w3', s.o3w);
+  ['o1l','o2l','o3l','o1pw','o2pw','o3pw','o2s','o2c','o3s','o3c','o1pn','o2pn','o3pn',
+   'cut','res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
+   'e3a','e3d','e3s','e3r','lrt','ldep','l2rt','l2dep',
+   'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol'].forEach(k => setVal(k, s[k]));
+  setGroup('ldst', s.ldst); setGroup('lwf', s.lwf); setGroup('l2wf', s.l2wf);
+  if (s.m) {
+    s.m.forEach((slot, i) => {
+      if (i >= 8) return;
+      document.getElementById(`m-en-${i}`).checked = !!slot[0];
+      document.getElementById(`m-src-${i}`).value = slot[1];
+      document.getElementById(`m-dst-${i}`).value = slot[2];
+      document.getElementById(`m-amt-${i}`).value = slot[3];
+      document.getElementById(`m-val-${i}`).textContent = (+slot[3]).toFixed(2);
+    });
+  }
+}
+
 function loadPreset(idx) {
   curPreset = idx;
   psel.value = idx;
   document.querySelectorAll('.shelf-list button').forEach(b =>
     b.classList.toggle('active', +b.dataset.i === idx));
-  fetch('/preset?i=' + idx).then(r => r.json()).then(s => {
-    setGroup('w1', s.o1w); setGroup('w2', s.o2w); setGroup('w3', s.o3w);
-    ['o1l','o2l','o3l','o1pw','o2pw','o3pw','o2s','o2c','o3s','o3c','o1pn','o2pn','o3pn',
-     'cut','res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
-     'e3a','e3d','e3s','e3r','lrt','ldep','l2rt','l2dep',
-     'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol'].forEach(k => setVal(k, s[k]));
-    setGroup('ldst', s.ldst); setGroup('lwf', s.lwf); setGroup('l2wf', s.l2wf);
-    if (s.m) {
-      s.m.forEach((slot, i) => {
-        if (i >= 8) return;
-        document.getElementById(`m-en-${i}`).checked = !!slot[0];
-        document.getElementById(`m-src-${i}`).value = slot[1];
-        document.getElementById(`m-dst-${i}`).value = slot[2];
-        document.getElementById(`m-amt-${i}`).value = slot[3];
-        document.getElementById(`m-val-${i}`).textContent = (+slot[3]).toFixed(2);
-      });
-    }
-  });
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send('preset:' + idx);
+  } else {
+    fetch('/preset?i=' + idx).then(r => r.json()).then(applyPresetObj);
+  }
 }
 
 fetch('/presets').then(r => r.json()).then(list => {

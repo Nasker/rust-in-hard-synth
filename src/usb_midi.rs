@@ -116,8 +116,9 @@ pub fn push_event(ev: SynthEvent) {
 }
 
 /// Request a preset change by index (0..84).
+/// Does not mark `SEEN` so the demo arp continues playing through new presets
+/// until an actual note is played on the MIDI or browser keyboard.
 pub fn set_program_change(prog: u8) {
-    SEEN.store(true, Ordering::Relaxed);
     PENDING_PROG.store(prog as usize, Ordering::Release);
 }
 
@@ -147,7 +148,10 @@ unsafe fn parse_packet(p: &[u8]) {
     let d1 = p[2];
     let d2 = p[3];
     let ev = match cin {
-        CIN_NOTE_ON if d2 > 0 => SynthEvent::note_on_midi(d1, d2),
+        CIN_NOTE_ON if d2 > 0 => {
+            SEEN.store(true, Ordering::Relaxed);
+            SynthEvent::note_on_midi(d1, d2)
+        }
         CIN_NOTE_ON | CIN_NOTE_OFF => SynthEvent::note_off(d1),
         CIN_CONTROL => {
             if d1 == 70 {
@@ -173,7 +177,6 @@ unsafe extern "C" fn in_xfer_cb(xfer: *mut usb_transfer_t) {
     if x.status == usb_transfer_status_t_USB_TRANSFER_STATUS_COMPLETED
         && x.actual_num_bytes >= 4
     {
-        SEEN.store(true, Ordering::Relaxed);
         let data = core::slice::from_raw_parts(x.data_buffer, x.actual_num_bytes as usize);
         for pkt in data.chunks_exact(4) {
             if pkt[0] != 0 {
