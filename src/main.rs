@@ -19,6 +19,7 @@ use log::info;
 use rinsynth_model as model;
 
 mod usb_midi;
+mod web;
 
 const SAMPLE_RATE: u32 = 44_100;
 /// Internal engine rate. Full-rate (44.1 kHz) keeps harmonics unaliased;
@@ -63,6 +64,11 @@ fn main() -> anyhow::Result<()> {
         Some(p.pins.gpio7), // MCLK
         p.pins.gpio4,       // LRCK/WS
     )?;
+
+    // Start Wi-Fi SoftAP + HTTP controller UI on Core 0 before moving `bank`
+    if let Err(e) = web::start(p.modem, &bank) {
+        log::error!("web: failed to start SoftAP/HTTP server: {:?}", e);
+    }
 
     // The engine needs a fat stack too (apply_preset + Voice init), and the
     // render loop must never share the small main-task stack with logging.
@@ -221,6 +227,11 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         // non-blocking — NoteEvents are Copy, ring is lock-free SPSC).
         while let Some(ev) = usb_midi::pop_event() {
             vm.receive_event(ev);
+        }
+
+        // Drain Web UI parameter/FX updates (lock-free SPSC ring from Core 0)
+        while let Some(cmd) = web::pop_cmd() {
+            web::apply_cmd(&mut vm, cmd);
         }
 
         if let Some(prog) = usb_midi::take_program_change() {

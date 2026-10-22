@@ -108,6 +108,19 @@ pub fn pop_event() -> Option<SynthEvent> {
     RING.pop()
 }
 
+/// Enqueue a synth event from another producer on Core 0 (e.g. Web UI).
+pub fn push_event(ev: SynthEvent) {
+    SEEN.store(true, Ordering::Relaxed);
+    EVENTS.fetch_add(1, Ordering::Relaxed);
+    RING.push(ev);
+}
+
+/// Request a preset change by index (0..84).
+pub fn set_program_change(prog: u8) {
+    SEEN.store(true, Ordering::Relaxed);
+    PENDING_PROG.store(prog as usize, Ordering::Release);
+}
+
 // ---------------------------------------------------------------------------
 // USB host plumbing — state is only touched by the usb_client task, so a
 // plain static mut is safe here (single-threaded access by construction).
