@@ -15,4 +15,8 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # Rust main() + logging needs more headroom than the 3.5K default
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
+# Many MIDI controllers expose an internal USB hub (or connect via one)
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+CONFIG_USB_HOST_HUB_MULTI_LEVEL=y
+
 # (partitions.csv in crate root is picked up automatically by esp-idf-sys)

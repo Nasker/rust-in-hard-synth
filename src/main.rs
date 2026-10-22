@@ -18,6 +18,8 @@ use esp_idf_sys as _;
 use log::info;
 use rinsynth_model as model;
 
+mod usb_midi;
+
 const SAMPLE_RATE: u32 = 44_100;
 /// Internal engine rate. Full-rate (44.1 kHz) keeps harmonics unaliased;
 /// half-rate (22.05 kHz) halves voice cost but folds >11 kHz content back
@@ -80,6 +82,10 @@ fn main() -> anyhow::Result<()> {
         )
         .expect("create audio task");
     }
+
+    // Install USB host on Core 0 (main task) so the USB OTG ISR lands on
+    // Core 0 and never preempts the Core 1 audio render loop.
+    usb_midi::start();
 
     // Main task idles from here on — keep it out of the audio path.
     loop {
@@ -179,21 +185,39 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
     let mut blocks: u32 = 0;
     let mut underruns: u32 = 0;
     let mut max_render_us: i64 = 0;
+    let mut arp_active: bool = true;
 
     loop {
         // Early bring-up visibility: print every block for the first 20,
         // then settle into ~1 s windows.
         let verbose = blocks < 20;
-        // note on this step's key
-        if blocks % STEP_BLOCKS == 0 {
-            let step = (blocks / STEP_BLOCKS) as usize;
-            vm.receive_event(NoteEvent::note_on_midi(ARP[step % ARP.len()], 104));
+
+        // Drain MIDI events queued by the USB task (block-boundary,
+        // non-blocking — NoteEvents are Copy, ring is lock-free SPSC).
+        while let Some(ev) = usb_midi::pop_event() {
+            vm.receive_event(ev);
         }
-        // release the key from 3 steps back — bounds voice count while
-        // letting release tails overlap
-        if blocks % STEP_BLOCKS == STEP_BLOCKS / 2 {
-            let step = ((blocks / STEP_BLOCKS) as usize).wrapping_sub(3);
-            vm.receive_event(NoteEvent::note_off(ARP[step % ARP.len()]));
+
+        if arp_active && usb_midi::midi_seen() {
+            info!("usb-midi: first MIDI activity — stopping demo arp");
+            for &n in &ARP {
+                vm.receive_event(NoteEvent::note_off(n));
+            }
+            arp_active = false;
+        }
+
+        if arp_active {
+            // note on this step's key
+            if blocks % STEP_BLOCKS == 0 {
+                let step = (blocks / STEP_BLOCKS) as usize;
+                vm.receive_event(NoteEvent::note_on_midi(ARP[step % ARP.len()], 104));
+            }
+            // release the key from 3 steps back — bounds voice count while
+            // letting release tails overlap
+            if blocks % STEP_BLOCKS == STEP_BLOCKS / 2 {
+                let step = ((blocks / STEP_BLOCKS) as usize).wrapping_sub(3);
+                vm.receive_event(NoteEvent::note_off(ARP[step % ARP.len()]));
+            }
         }
 
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
@@ -250,9 +274,10 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
         if blocks % 172 == 0 {
             // ~1 s of blocks
             info!(
-                "blocks: {} | voices: {} | render max: {}us/{}us | write errors: {}",
+                "blocks: {} | voices: {} | midi: {} | render max: {}us/{}us | write errors: {}",
                 blocks,
                 vm.active_voice_count(),
+                usb_midi::event_count(),
                 max_render_us,
                 BLOCK_US,
                 underruns
