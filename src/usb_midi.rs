@@ -20,6 +20,7 @@ use rinsynth_model::event::SynthEvent;
 const CIN_NOTE_OFF: u8 = 0x8;
 const CIN_NOTE_ON: u8 = 0x9;
 const CIN_CONTROL: u8 = 0xB;
+const CIN_PROGRAM: u8 = 0xC;
 const CIN_PITCH_BEND: u8 = 0xE;
 
 const XFER_SIZE: usize = 256;
@@ -79,6 +80,7 @@ impl SpscRing {
 static RING: SpscRing = SpscRing::new();
 static SEEN: AtomicBool = AtomicBool::new(false);
 static EVENTS: AtomicUsize = AtomicUsize::new(0);
+static PENDING_PROG: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// True once any MIDI packet has been observed — used to gate the demo
 /// arp off once a real keyboard is in play.
@@ -89,6 +91,16 @@ pub fn midi_seen() -> bool {
 /// Total MIDI events queued since boot.
 pub fn event_count() -> usize {
     EVENTS.load(Ordering::Relaxed)
+}
+
+/// Take a pending MIDI Program Change (or CC 70 preset select), if any.
+pub fn take_program_change() -> Option<u8> {
+    let v = PENDING_PROG.swap(usize::MAX, Ordering::AcqRel);
+    if v == usize::MAX {
+        None
+    } else {
+        Some(v as u8)
+    }
 }
 
 /// Pop the next queued event (audio task context).
@@ -124,7 +136,18 @@ unsafe fn parse_packet(p: &[u8]) {
     let ev = match cin {
         CIN_NOTE_ON if d2 > 0 => SynthEvent::note_on_midi(d1, d2),
         CIN_NOTE_ON | CIN_NOTE_OFF => SynthEvent::note_off(d1),
-        CIN_CONTROL => SynthEvent::control_change(d1, d2),
+        CIN_CONTROL => {
+            if d1 == 70 {
+                // CC 70 (Sound Variation) -> select preset index
+                PENDING_PROG.store(d2 as usize, Ordering::Release);
+            }
+            SynthEvent::control_change(d1, d2)
+        }
+        CIN_PROGRAM => {
+            PENDING_PROG.store(d1 as usize, Ordering::Release);
+            EVENTS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         CIN_PITCH_BEND => SynthEvent::pitch_bend_midi(((d2 as u16) << 7) | d1 as u16),
         _ => return,
     };

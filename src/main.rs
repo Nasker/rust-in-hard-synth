@@ -37,9 +37,9 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
     info!("rinsynth-esp32 {} — dsp engine render", env!("CARGO_PKG_VERSION"));
 
-    // serde recursion through ~90 Preset fields needs far more stack than
-    // the 16 KB main task — run the smoke test on a dedicated thread.
-    std::thread::Builder::new()
+    // serde recursion + factory bank materialization need far more stack
+    // than the 16 KB main task — run on a 64 KB thread and return the bank.
+    let bank = std::thread::Builder::new()
         .stack_size(64 * 1024)
         .name("model_smoke".into())
         .spawn(model_smoke)?
@@ -70,13 +70,13 @@ fn main() -> anyhow::Result<()> {
     // esp_pthread_set_cfg path demonstrably did NOT size the pthread
     // (hwm read 0 with a nominal 160 KB stack), while xTaskCreatePinnedToCore
     // gives deterministic stack + priority + core pinning in one call.
-    let tx = Box::new(tx);
+    let ctx = Box::new(AudioTaskArgs { tx, bank });
     unsafe {
         esp_idf_hal::task::create(
             audio_task_trampoline,
             c"rinsynth-audio",
             64 * 1024,
-            Box::into_raw(tx) as *mut _,
+            Box::into_raw(ctx) as *mut _,
             10,
             Some(esp_idf_hal::cpu::Core::Core1),
         )
@@ -93,15 +93,20 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+struct AudioTaskArgs {
+    tx: I2sDriver<'static, I2sTx>,
+    bank: Vec<model::presets::Preset>,
+}
+
 extern "C" fn audio_task_trampoline(arg: *mut core::ffi::c_void) {
-    let tx = unsafe { Box::from_raw(arg as *mut I2sDriver<'static, I2sTx>) };
-    if std::panic::catch_unwind(move || audio_task(*tx)).is_err() {
+    let args = unsafe { Box::from_raw(arg as *mut AudioTaskArgs) };
+    if std::panic::catch_unwind(move || audio_task(args.tx, args.bank)).is_err() {
         log::error!("audio task panicked — halting task");
     }
     unsafe { esp_idf_sys::vTaskDelete(core::ptr::null_mut()) }
 }
 
-fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
+fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     use rinsynth_dsp::embedded::EmbeddedEngine;
     use rinsynth_model::event::{NoteEvent};
     
@@ -137,12 +142,32 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
     // the heap). For now: default "Init" lead preset, tastefully nudged.
     let mut preset = model::presets::Preset::default();
     preset.polyphony_mode = model::voice::PolyphonyMode::Poly;
+    preset.filter_cutoff = 1800.0;
+    preset.filter_resonance = 0.50;
+    preset.filter_attack = 0.01;
+    preset.filter_decay = 0.35;
+    preset.filter_sustain = 0.25;
+    preset.filter_release = 0.4;
+    preset.filter_env_amount = 0.40;
     preset.lfo_destination = model::lfo::LfoDestination::FilterCutoff;
     preset.lfo_rate = 0.4;
-    preset.lfo_depth = 0.25;
-    preset.amp_release = 0.6; // longer tails — exercise more voice overlap
-    preset.osc3_level = 0.0; // two detuned saws — enough for the demo, ~140cyc/sample cheaper
-    info!("engine: applying preset '{}'", preset.name);
+    preset.lfo_depth = 0.20;
+    preset.amp_release = 0.6;
+    preset.osc3_level = 0.0;
+    // Enable lush stereo FX chain (Chorus -> Ping-Pong Delay -> Reverb)
+    preset.chorus_enabled = true;
+    preset.chorus_rate = 0.8;
+    preset.chorus_depth = 3.5;
+    preset.chorus_mix = 0.22;
+    preset.delay_enabled = true;
+    preset.delay_time = 0.36;
+    preset.delay_feedback = 0.35;
+    preset.delay_mix = 0.20;
+    preset.reverb_enabled = true;
+    preset.reverb_room_size = 0.55;
+    preset.reverb_damping = 0.45;
+    preset.reverb_mix = 0.20;
+    info!("engine: applying preset '{}' (TPT SVF + Chorus/Delay/Reverb)", preset.name);
     info!(
         "engine: stack hwm after Preset::default = {}",
         unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
@@ -196,6 +221,16 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>) {
         // non-blocking — NoteEvents are Copy, ring is lock-free SPSC).
         while let Some(ev) = usb_midi::pop_event() {
             vm.receive_event(ev);
+        }
+
+        if let Some(prog) = usb_midi::take_program_change() {
+            if !bank.is_empty() {
+                let idx = (prog as usize) % bank.len();
+                let mut p = bank[idx].clone();
+                p.polyphony_mode = model::voice::PolyphonyMode::Poly;
+                vm.apply_preset(&p);
+                info!("usb-midi: preset [{}] '{}' ({})", idx, p.name, p.category);
+            }
         }
 
         if arp_active && usb_midi::midi_seen() {
@@ -308,7 +343,7 @@ fn bytemuck_cast_i16(b: &[i16]) -> &[u8] {
 
 /// Phase 2 smoke test: prove the portable model crate works on-target —
 /// param spec, CC map, preset serde roundtrip, mod matrix, factory bank.
-fn model_smoke() {
+fn model_smoke() -> Vec<model::presets::Preset> {
     use model::types::midi_to_frequency;
 
     let params = model::params::SynthParam::all();
@@ -337,4 +372,5 @@ fn model_smoke() {
 
     // Type sanity: midi→freq table
     info!("model: A4 = {:.1} Hz", midi_to_frequency(69));
+    bank
 }
