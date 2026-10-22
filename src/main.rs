@@ -56,6 +56,7 @@ fn main() -> anyhow::Result<()> {
         StdGpioConfig::default(),
     );
 
+    let modem = p.modem;
     let tx = I2sDriver::new_std_tx(
         p.i2s0,
         &std_cfg,
@@ -65,28 +66,26 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio4,       // LRCK/WS
     )?;
 
-    // Start Wi-Fi SoftAP + HTTP controller UI on Core 0 before moving `bank`
-    if let Err(e) = web::start(p.modem, &bank) {
-        log::error!("web: failed to start SoftAP/HTTP server: {:?}", e);
-    }
+    // Build preset JSON tables and spawn audio task FIRST (before Wi-Fi
+    // fragments internal SRAM). High-water mark shows audio_task uses ~7.3 KB,
+    // so 24 KB gives >3x headroom while leaving ~110 KB internal RAM for lwIP/Wi-Fi.
+    web::init_presets_json(&bank);
 
-    // The engine needs a fat stack too (apply_preset + Voice init), and the
-    // render loop must never share the small main-task stack with logging.
-    // Spawned as a raw FreeRTOS task: the ThreadSpawnConfiguration/
-    // esp_pthread_set_cfg path demonstrably did NOT size the pthread
-    // (hwm read 0 with a nominal 160 KB stack), while xTaskCreatePinnedToCore
-    // gives deterministic stack + priority + core pinning in one call.
     let ctx = Box::new(AudioTaskArgs { tx, bank });
     unsafe {
         esp_idf_hal::task::create(
             audio_task_trampoline,
             c"rinsynth-audio",
-            64 * 1024,
+            24 * 1024,
             Box::into_raw(ctx) as *mut _,
             10,
             Some(esp_idf_hal::cpu::Core::Core1),
         )
         .expect("create audio task");
+    }
+
+    if let Err(e) = web::start(modem) {
+        log::error!("web: failed to start SoftAP/HTTP server: {:?}", e);
     }
 
     // Install USB host on Core 0 (main task) so the USB OTG ISR lands on
