@@ -9,18 +9,15 @@
 //! render loop exclusively through lock-free SPSC rings.
 
 use core::cell::UnsafeCell;
+use core::ffi::CStr;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use esp_idf_hal::cpu::Core;
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer, KeepAlive};
-use esp_idf_svc::http::Method;
-use esp_idf_svc::io::Write;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, Configuration as WifiConfig, EspWifi,
 };
-use esp_idf_svc::ws::FrameType;
+use esp_idf_sys::*;
 use log::info;
 use rinsynth_dsp::embedded::EmbeddedEngine;
 use rinsynth_dsp::FilterMode;
@@ -392,8 +389,89 @@ fn handle_query(q: &str) {
     }
 }
 
-/// Start the SoftAP + HTTP server on Core 0. Leaks the handles intentionally
-/// so the background services stay alive for the life of the firmware.
+unsafe extern "C" fn index_get(req: *mut httpd_req_t) -> esp_err_t {
+    httpd_resp_set_type(req, c"text/html; charset=utf-8".as_ptr());
+    httpd_resp_send(req, INDEX_HTML.as_ptr() as *const _, INDEX_HTML.len() as isize)
+}
+
+unsafe extern "C" fn presets_get(req: *mut httpd_req_t) -> esp_err_t {
+    let body = PRESETS_LIST_JSON.get().map(|s| s.as_str()).unwrap_or("[]");
+    httpd_resp_set_type(req, c"application/json".as_ptr());
+    httpd_resp_send(req, body.as_ptr() as *const _, body.len() as isize)
+}
+
+unsafe extern "C" fn preset_get(req: *mut httpd_req_t) -> esp_err_t {
+    let uri = CStr::from_ptr((*req).uri.as_ptr()).to_str().unwrap_or("");
+    let idx = uri
+        .split_once("i=")
+        .and_then(|(_, s)| s.split('&').next())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    usb_midi::set_program_change(idx as u8);
+    let body = PRESET_DETAILS_JSON
+        .get()
+        .and_then(|v| v.get(idx))
+        .map(|s| s.as_str())
+        .unwrap_or("{}");
+    httpd_resp_set_type(req, c"application/json".as_ptr());
+    httpd_resp_send(req, body.as_ptr() as *const _, body.len() as isize)
+}
+
+unsafe extern "C" fn cmd_get(req: *mut httpd_req_t) -> esp_err_t {
+    let uri = CStr::from_ptr((*req).uri.as_ptr()).to_str().unwrap_or("");
+    if let Some((_, q)) = uri.split_once('?') {
+        handle_query(q);
+    }
+    httpd_resp_send(req, c"ok".as_ptr(), 2)
+}
+
+unsafe extern "C" fn ws_get(req: *mut httpd_req_t) -> esp_err_t {
+    if (*req).method == http_method_HTTP_GET as i32 {
+        return ESP_OK; // completes the WebSocket handshake
+    }
+    let mut pkt: httpd_ws_frame_t = core::mem::zeroed();
+    pkt.type_ = httpd_ws_type_t_HTTPD_WS_TYPE_TEXT;
+
+    // Step 1: fetch frame header & payload length. Return `ret` on any error
+    // so `httpd` closes dead/invalid sockets instead of livelocking!
+    let ret = httpd_ws_recv_frame(req, &mut pkt, 0);
+    if ret != ESP_OK {
+        return ret;
+    }
+    if pkt.len == 0 || pkt.len > 255 {
+        return ESP_OK;
+    }
+
+    let mut buf = [0u8; 256];
+    pkt.payload = buf.as_mut_ptr();
+    let ret = httpd_ws_recv_frame(req, &mut pkt, pkt.len);
+    if ret != ESP_OK {
+        return ret;
+    }
+
+    if pkt.type_ == httpd_ws_type_t_HTTPD_WS_TYPE_TEXT {
+        if let Ok(msg) = core::str::from_utf8(&buf[..pkt.len]) {
+            if let Some(rest) = msg.strip_prefix("preset:") {
+                let idx = rest.trim().parse::<usize>().unwrap_or(0);
+                usb_midi::set_program_change(idx as u8);
+                if let Some(body) = PRESET_DETAILS_JSON.get().and_then(|v| v.get(idx)) {
+                    let mut out: httpd_ws_frame_t = core::mem::zeroed();
+                    out.final_ = true;
+                    out.fragmented = false;
+                    out.type_ = httpd_ws_type_t_HTTPD_WS_TYPE_TEXT;
+                    out.payload = body.as_ptr() as *mut u8;
+                    out.len = body.len();
+                    let _ = httpd_ws_send_frame(req, &mut out);
+                }
+            } else {
+                handle_query(msg);
+            }
+        }
+    }
+    ESP_OK
+}
+
+/// Start the SoftAP + HTTP/WS server on Core 0.
 pub fn start(modem: Modem<'static>, bank: &[Preset]) -> anyhow::Result<()> {
     // Pre-build preset directory & per-preset UI JSON in PSRAM
     let mut list_json = String::with_capacity(4096);
@@ -424,91 +502,67 @@ pub fn start(modem: Modem<'static>, bank: &[Preset]) -> anyhow::Result<()> {
         ..Default::default()
     }))?;
     wifi.start()?;
-    // Critical for real-time Web UI: disable Wi-Fi modem power-save sleep so
-    // packets aren't buffered for 100-300 ms between beacon intervals.
     unsafe {
-        esp_idf_sys::esp_wifi_set_ps(esp_idf_sys::wifi_ps_type_t_WIFI_PS_NONE);
+        esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE);
+
+        let cfg = httpd_config_t {
+            task_priority: 5,
+            stack_size: 8192,
+            core_id: 0,
+            task_caps: MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+            server_port: 80,
+            ctrl_port: 32768,
+            max_open_sockets: 7,
+            max_uri_handlers: 8,
+            max_resp_headers: 8,
+            backlog_conn: 5,
+            lru_purge_enable: true,
+            recv_wait_timeout: 5,
+            send_wait_timeout: 5,
+            ..Default::default()
+        };
+        let mut srv: httpd_handle_t = core::ptr::null_mut();
+        esp!(httpd_start(&mut srv, &cfg))?;
+
+        let uris = [
+            httpd_uri_t {
+                uri: c"/".as_ptr(),
+                method: http_method_HTTP_GET,
+                handler: Some(index_get),
+                ..Default::default()
+            },
+            httpd_uri_t {
+                uri: c"/presets".as_ptr(),
+                method: http_method_HTTP_GET,
+                handler: Some(presets_get),
+                ..Default::default()
+            },
+            httpd_uri_t {
+                uri: c"/preset".as_ptr(),
+                method: http_method_HTTP_GET,
+                handler: Some(preset_get),
+                ..Default::default()
+            },
+            httpd_uri_t {
+                uri: c"/cmd".as_ptr(),
+                method: http_method_HTTP_GET,
+                handler: Some(cmd_get),
+                ..Default::default()
+            },
+            httpd_uri_t {
+                uri: c"/ws".as_ptr(),
+                method: http_method_HTTP_GET,
+                handler: Some(ws_get),
+                is_websocket: true,
+                ..Default::default()
+            },
+        ];
+        for u in &uris {
+            esp!(httpd_register_uri_handler(srv, u))?;
+        }
     }
     Box::leak(wifi);
 
-    let http_cfg = HttpConfig {
-        core: Some(Core::Core0),
-        max_open_sockets: 7,
-        stack_size: 10240,
-        lru_purge_enable: true,
-        keep_alive: Some(KeepAlive {
-            idle_secs: 15,
-            interval_secs: 5,
-            probe_count: 3,
-        }),
-        ..Default::default()
-    };
-    let mut server = Box::new(EspHttpServer::new(&http_cfg)?);
-
-    server.fn_handler("/", Method::Get, |req| -> anyhow::Result<()> {
-        let mut resp = req.into_response(200, Some("OK"), &[("Content-Type", "text/html; charset=utf-8")])?;
-        resp.write_all(INDEX_HTML.as_bytes())?;
-        Ok(())
-    })?;
-
-    server.fn_handler("/presets", Method::Get, |req| -> anyhow::Result<()> {
-        let body = PRESETS_LIST_JSON.get().map(|s| s.as_str()).unwrap_or("[]");
-        let mut resp = req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
-        resp.write_all(body.as_bytes())?;
-        Ok(())
-    })?;
-
-    server.fn_handler("/preset", Method::Get, |req| -> anyhow::Result<()> {
-        let uri = req.uri();
-        let idx = uri
-            .split_once("i=")
-            .and_then(|(_, s)| s.split('&').next())
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
-        usb_midi::set_program_change(idx as u8);
-        let body = PRESET_DETAILS_JSON
-            .get()
-            .and_then(|v| v.get(idx))
-            .map(|s| s.as_str())
-            .unwrap_or("{}");
-        let mut resp = req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
-        resp.write_all(body.as_bytes())?;
-        Ok(())
-    })?;
-
-    server.fn_handler("/cmd", Method::Get, |req| -> anyhow::Result<()> {
-        if let Some((_, q)) = req.uri().split_once('?') {
-            handle_query(q);
-        }
-        let mut resp = req.into_ok_response()?;
-        resp.write_all(b"ok")?;
-        Ok(())
-    })?;
-
-    server.ws_handler("/ws", None, |ws| -> anyhow::Result<()> {
-        if ws.is_new() || ws.is_closed() {
-            return Ok(());
-        }
-        let mut buf = [0u8; 256];
-        let (frame_type, len) = ws.recv(&mut buf)?;
-        if let FrameType::Text(_) = frame_type {
-            let n = len.saturating_sub(1).min(buf.len());
-            if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
-                if let Some(rest) = msg.strip_prefix("preset:") {
-                    let idx = rest.trim().parse::<usize>().unwrap_or(0);
-                    usb_midi::set_program_change(idx as u8);
-                    if let Some(body) = PRESET_DETAILS_JSON.get().and_then(|v| v.get(idx)) {
-                        ws.send(FrameType::Text(false), body.as_bytes())?;
-                    }
-                } else {
-                    handle_query(msg);
-                }
-            }
-        }
-        Ok(())
-    })?;
-
-    Box::leak(server);
     info!("web: SoftAP '{}' ready — browse to http://192.168.71.1", AP_SSID);
     Ok(())
 }
