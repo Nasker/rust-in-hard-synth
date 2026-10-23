@@ -163,9 +163,10 @@ Fold all used) with no UI control — that alone read as "distorts awfully".
 ### Remaining DSP notes
 
 - In the instrumented build the governor settles ~cap 2-3 under 4-osc +
-  all-FX load; uninstrumented should hold ~4. `HALF_RATE` (22050 synth +
-  Catmull-Rom upsample) remains the escape hatch if 6-voice full-rate is ever
-  required.
+  all-FX load; uninstrumented should hold ~4. Half-rate rendering is now a
+  runtime A/B: `SynthRate` UI buttons / `srate` cmd flip the engine 44100 ↔
+  22050 at the block boundary (`vm.set_sample_rate` re-derives coefficients
+  in place; 128 synth frames + Catmull-Rom 2x upsample, ~half render cost).
 - `peak:` telemetry answers "is it still clipping" at a glance; `late:`
   answers "is it still underrunning". Both reset each ~1 s window.
 
