@@ -32,6 +32,9 @@ const FRAMES: usize = 256;
 const SYNTH_FRAMES: usize = FRAMES; // buffer size; runtime half-rate uses FRAMES/2
 /// 256 output frames / 44.1 kHz
 const BLOCK_US: i64 = 5805;
+/// Blocks (~5.8 ms each) to let the governor shed voices. Wi-Fi/HTTP bring-up
+/// starves the render core for the first seconds; don't shed during it.
+const WARMUP_BLOCKS: u32 = 1_720;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_sys::link_patches();
@@ -338,7 +341,11 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             overruns += 1;
             late_streak += 1;
             cool = 0;
-            if late_streak >= 4 {
+            // Warm-up: ignore late streaks for ~10 s after boot — the Wi-Fi
+            // connect + HTTP churn burst starves the render core and would
+            // shed voices before the user even plays, then take ~5 s/voice
+            // to restore. Overruns are still counted for telemetry.
+            if late_streak >= 4 && blocks >= WARMUP_BLOCKS {
                 // Lower the cap if possible (floor 1 — a single voice always
                 // fits the deadline), then shed while more voices are
                 // sounding than the cap allows.
