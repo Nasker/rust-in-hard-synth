@@ -11,7 +11,7 @@
 
 use core::cell::UnsafeCell;
 use std::ffi::{CStr, CString};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
@@ -59,6 +59,8 @@ pub enum WebCmd {
     DistMix(f32),
     /// User-set polyphony ceiling (1..6) — the CPU governor never exceeds it.
     VoiceCap(u8),
+    /// Runtime A/B: render the engine at 22050 Hz (true) vs 44100 Hz (false).
+    SynthHalf(bool),
     ChorusRate(f32),
     ChorusDepth(f32),
     ChorusMix(f32),
@@ -124,9 +126,17 @@ static SAVED_SSID: Mutex<String> = Mutex::new(String::new());
 /// UI-configured polyphony ceiling — the audio-loop governor reads this every
 /// block and clamps its adaptive cap to it.
 static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(6);
+/// Runtime rate toggle — the render loop reads this every block to choose
+/// between 256 direct frames (44.1 kHz) and 128 frames + Catmull-Rom 2x
+/// upsample (22.05 kHz).
+static SYNTH_HALF: AtomicBool = AtomicBool::new(false);
 
 pub fn user_voice_cap() -> usize {
     USER_VOICE_CAP.load(Ordering::Relaxed).clamp(1, 6)
+}
+
+pub fn synth_half() -> bool {
+    SYNTH_HALF.load(Ordering::Relaxed)
 }
 
 pub fn pop_cmd() -> Option<WebCmd> {
@@ -224,6 +234,10 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
             vm.effects.set_distortion_mix(v);
         }
         WebCmd::VoiceCap(n) => USER_VOICE_CAP.store(n as usize, Ordering::Relaxed),
+        WebCmd::SynthHalf(on) => {
+            SYNTH_HALF.store(on, Ordering::Relaxed);
+            vm.set_sample_rate(if on { 22_050 } else { 44_100 });
+        }
         WebCmd::ChorusRate(v) => vm.effects.set_chorus_rate(v),
         WebCmd::ChorusDepth(v) => vm.effects.set_chorus_depth(v),
         WebCmd::ChorusMix(v) => {
@@ -458,6 +472,7 @@ fn handle_query_one(q: &str) {
         "rv_m" => CMD_RING.push(WebCmd::RevMix(v)),
         "vol" => CMD_RING.push(WebCmd::Param(SynthParam::MasterVolume, v)),
         "pcap" => CMD_RING.push(WebCmd::VoiceCap(v as u8)),
+        "srate" => CMD_RING.push(WebCmd::SynthHalf(v != 0.0)),
         _ => {}
     }
 }

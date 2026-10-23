@@ -25,11 +25,11 @@ const SAMPLE_RATE: u32 = 44_100;
 /// Internal engine rate. Full-rate (44.1 kHz) keeps harmonics unaliased;
 /// half-rate (22.05 kHz) halves voice cost but folds >11 kHz content back
 /// as inharmonic partials — audible as a glassy edge on bright patches.
-/// Flip SYNTH_RATE + HALF_RATE together (interpolator below handles 2x).
+/// Boot render rate — the web `srate` toggle switches 44100 ↔ 22050 at
+/// runtime (128 synth frames + Catmull-Rom 2x upsample, interpolator below).
 const SYNTH_RATE: u32 = 44_100;
-const HALF_RATE: bool = SYNTH_RATE != SAMPLE_RATE;
 const FRAMES: usize = 256;
-const SYNTH_FRAMES: usize = if HALF_RATE { FRAMES / 2 } else { FRAMES };
+const SYNTH_FRAMES: usize = FRAMES; // buffer size; runtime half-rate uses FRAMES/2
 /// 256 output frames / 44.1 kHz
 const BLOCK_US: i64 = 5805;
 
@@ -278,8 +278,10 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             }
         }
 
+        let half = web::synth_half();
+        let synth_frames = if half { FRAMES / 2 } else { FRAMES };
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
-        for i in 0..SYNTH_FRAMES {
+        for i in 0..synth_frames {
             let s = vm.next_sample_stereo();
             if s.left.abs() > peak {
                 peak = s.left.abs();
@@ -291,11 +293,11 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         }
         let dt = unsafe { esp_idf_sys::esp_timer_get_time() } - t0;
 
-        if HALF_RATE {
+        if half {
             // 2x upsample: even outputs pass the synth sample (one
             // synth-frame delay), odd outputs get a Catmull-Rom midpoint
             // (-p0 + 9p1 + 9p2 - p3) / 16.
-            for i in 0..SYNTH_FRAMES {
+            for i in 0..synth_frames {
                 hist[0] = hist[1];
                 hist[1] = hist[2];
                 hist[2] = hist[3];
