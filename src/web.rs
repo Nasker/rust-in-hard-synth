@@ -21,6 +21,7 @@ use esp_idf_svc::wifi::{
 };
 use esp_idf_sys::*;
 use log::info;
+use rinsynth_dsp::effects::DistortionType;
 use rinsynth_dsp::embedded::EmbeddedEngine;
 use rinsynth_dsp::FilterMode;
 use rinsynth_model::event::SynthEvent;
@@ -52,6 +53,12 @@ pub enum WebCmd {
     Env3Sustain(f32),
     Env3Release(f32),
     ModSlot(u8, ModSlot),
+    DistEnable(bool),
+    DistType(u8),
+    DistDrive(f32),
+    DistMix(f32),
+    /// User-set polyphony ceiling (1..6) — the CPU governor never exceeds it.
+    VoiceCap(u8),
     ChorusRate(f32),
     ChorusDepth(f32),
     ChorusMix(f32),
@@ -114,6 +121,13 @@ static PRESETS_LIST_JSON: OnceLock<String> = OnceLock::new();
 static PRESET_DETAILS_JSON: OnceLock<Vec<String>> = OnceLock::new();
 static WIFI: Mutex<Option<EspWifi<'static>>> = Mutex::new(None);
 static SAVED_SSID: Mutex<String> = Mutex::new(String::new());
+/// UI-configured polyphony ceiling — the audio-loop governor reads this every
+/// block and clamps its adaptive cap to it.
+static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(6);
+
+pub fn user_voice_cap() -> usize {
+    USER_VOICE_CAP.load(Ordering::Relaxed).clamp(1, 6)
+}
 
 pub fn pop_cmd() -> Option<WebCmd> {
     CMD_RING.pop()
@@ -197,6 +211,19 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
         WebCmd::Env3Sustain(v) => vm.set_env3_sustain(v),
         WebCmd::Env3Release(v) => vm.set_env3_release(v),
         WebCmd::ModSlot(idx, slot) => vm.set_mod_slot(idx as usize, slot),
+        WebCmd::DistEnable(on) => vm.effects.set_distortion_enabled(on),
+        WebCmd::DistType(t) => {
+            vm.effects.set_distortion_type(DistortionType::from_index(t));
+        }
+        WebCmd::DistDrive(v) => vm.effects.set_distortion_drive(v),
+        WebCmd::DistMix(v) => {
+            // Mix>0 implicitly enables, matching the other FX convention.
+            if v > 0.001 {
+                vm.effects.set_distortion_enabled(true);
+            }
+            vm.effects.set_distortion_mix(v);
+        }
+        WebCmd::VoiceCap(n) => USER_VOICE_CAP.store(n as usize, Ordering::Relaxed),
         WebCmd::ChorusRate(v) => vm.effects.set_chorus_rate(v),
         WebCmd::ChorusDepth(v) => vm.effects.set_chorus_depth(v),
         WebCmd::ChorusMix(v) => {
@@ -251,7 +278,8 @@ fn preset_to_ui_json(p: &Preset) -> String {
             "\"e3a\":{:.3},\"e3d\":{:.3},\"e3s\":{:.3},\"e3r\":{:.3},",
             "\"ldst\":{},\"lwf\":{},\"lrt\":{:.3},\"ldep\":{:.3},",
             "\"l2wf\":{},\"l2rt\":{:.3},\"l2dep\":{:.3},",
-            "\"ch_r\":{:.3},\"ch_d\":{:.3},\"ch_m\":{:.3},",
+            "\"dt_e\":{},\"dt_t\":{},\"dt_d\":{:.3},\"dt_m\":{:.3},",
+        "\"ch_r\":{:.3},\"ch_d\":{:.3},\"ch_m\":{:.3},",
             "\"dl_t\":{:.3},\"dl_fb\":{:.3},\"dl_m\":{:.3},",
             "\"rv_r\":{:.3},\"rv_d\":{:.3},\"rv_m\":{:.3},",
             "\"vol\":{:.3},\"m\":{}",
@@ -303,6 +331,10 @@ fn preset_to_ui_json(p: &Preset) -> String {
         p.lfo2_waveform as u8,
         p.lfo2_rate,
         p.lfo2_depth,
+        if p.distortion_enabled { 1 } else { 0 },
+        p.distortion_type.index(),
+        p.distortion_drive,
+        p.distortion_mix,
         p.chorus_rate,
         p.chorus_depth,
         if p.chorus_enabled { p.chorus_mix } else { 0.0 },
@@ -411,6 +443,10 @@ fn handle_query_one(q: &str) {
         "l2wf" => CMD_RING.push(WebCmd::Lfo2Wf(v as u8)),
         "l2rt" => CMD_RING.push(WebCmd::Lfo2Rate(v)),
         "l2dep" => CMD_RING.push(WebCmd::Lfo2Depth(v)),
+        "dt_e" => CMD_RING.push(WebCmd::DistEnable(v != 0.0)),
+        "dt_t" => CMD_RING.push(WebCmd::DistType(v as u8)),
+        "dt_d" => CMD_RING.push(WebCmd::DistDrive(v)),
+        "dt_m" => CMD_RING.push(WebCmd::DistMix(v)),
         "ch_r" => CMD_RING.push(WebCmd::ChorusRate(v)),
         "ch_d" => CMD_RING.push(WebCmd::ChorusDepth(v)),
         "ch_m" => CMD_RING.push(WebCmd::ChorusMix(v)),
@@ -421,6 +457,7 @@ fn handle_query_one(q: &str) {
         "rv_d" => CMD_RING.push(WebCmd::RevDamp(v)),
         "rv_m" => CMD_RING.push(WebCmd::RevMix(v)),
         "vol" => CMD_RING.push(WebCmd::Param(SynthParam::MasterVolume, v)),
+        "pcap" => CMD_RING.push(WebCmd::VoiceCap(v as u8)),
         _ => {}
     }
 }

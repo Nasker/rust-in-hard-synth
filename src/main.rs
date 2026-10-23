@@ -185,7 +185,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
 
     // Per-stage cycle profiler — install only when needed; the probes
     // themselves cost ~150 cyc/voice-sample (five rsr.ccount + atomics).
-    const PROFILE_HOOK: bool = false;
+    const PROFILE_HOOK: bool = true;
     fn ccount() -> u64 {
         unsafe { esp_idf_sys::xthal_get_ccount() as u64 }
     }
@@ -213,8 +213,22 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     info!("engine: arp start");
     let mut blocks: u32 = 0;
     let mut underruns: u32 = 0;
+    let mut overruns: u32 = 0; // blocks whose render exceeded the DMA deadline
     let mut max_render_us: i64 = 0;
+    let mut peak: f32 = 0.0;   // worst |sample| this second — >1.0 = limiter squashing
     let mut arp_active: bool = true;
+
+    // CPU governor: when blocks render past the deadline the DMA underruns
+    // (audible as harsh crackle, not clipping). Shed the oldest voice + lower
+    // the live polyphony cap instead. Restoration requires sustained margin —
+    // track the worst render over the clean window and only raise the cap if
+    // it stayed under ~75% of the deadline (prevents cap boundary ping-pong).
+    const MAX_VOICES: usize = 6;
+    let mut dyn_cap: usize = MAX_VOICES;
+    let mut late_streak: u32 = 0;
+    let mut cool: u32 = 0;
+    let mut cool_max: i64 = 0;
+    vm.set_voice_cap(MAX_VOICES);
 
     loop {
         // Early bring-up visibility: print every block for the first 20,
@@ -266,7 +280,14 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
 
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
         for i in 0..SYNTH_FRAMES {
-            synth[i] = vm.next_sample_stereo();
+            let s = vm.next_sample_stereo();
+            if s.left.abs() > peak {
+                peak = s.left.abs();
+            }
+            if s.right.abs() > peak {
+                peak = s.right.abs();
+            }
+            synth[i] = s;
         }
         let dt = unsafe { esp_idf_sys::esp_timer_get_time() } - t0;
 
@@ -303,6 +324,51 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             max_render_us = dt;
         }
 
+        // CPU governor + overrun accounting.
+        let ceiling = web::user_voice_cap().min(MAX_VOICES);
+        if dyn_cap > ceiling {
+            dyn_cap = ceiling;
+            vm.set_voice_cap(dyn_cap);
+        }
+        if dt > BLOCK_US {
+            // Rendering ran past the block's playback time — the I2S DMA
+            // drains faster than we produce → audible underrun crackle.
+            overruns += 1;
+            late_streak += 1;
+            cool = 0;
+            if late_streak >= 4 && dyn_cap > 2 {
+                dyn_cap -= 1;
+                vm.set_voice_cap(dyn_cap);
+                if let Some(n) = vm.shed_voice() {
+                    info!("cpu-guard: 4 late blocks -> cap {} (shed note {})", dyn_cap, n);
+                } else {
+                    info!("cpu-guard: 4 late blocks -> cap {}", dyn_cap);
+                }
+                late_streak = 0;
+            }
+        } else {
+            late_streak = 0;
+            if dyn_cap < ceiling {
+                cool += 1;
+                if dt > cool_max {
+                    cool_max = dt;
+                }
+                // ~5 s of on-time blocks AND the worst block still had ≥25%
+                // headroom — only then is one more voice likely to fit.
+                if cool >= 860 {
+                    if cool_max < BLOCK_US * 3 / 4 {
+                        dyn_cap += 1;
+                        vm.set_voice_cap(dyn_cap);
+                        info!("cpu-guard: margin ok (worst {}us) -> cap {}", cool_max, dyn_cap);
+                    }
+                    cool = 0;
+                    cool_max = 0;
+                }
+            } else {
+                cool_max = 0;
+            }
+        }
+
         if tx.write(bytemuck_cast_i16(&buf), 1000).is_err() {
             underruns += 1;
         }
@@ -318,12 +384,15 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         if blocks % 172 == 0 {
             // ~1 s of blocks
             info!(
-                "blocks: {} | voices: {} | midi: {} | render max: {}us/{}us | write errors: {}",
+                "blocks: {} | voices: {}/{} | midi: {} | render max: {}us/{}us | late: {} | peak: {:.2} | write errors: {}",
                 blocks,
                 vm.active_voice_count(),
+                dyn_cap,
                 usb_midi::event_count(),
                 max_render_us,
                 BLOCK_US,
+                overruns,
+                peak,
                 underruns
             );
             // Per-stage cycle breakdown (cycles per rendered sample, this second)
@@ -331,16 +400,19 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             if snap[rinsynth_dsp::profile::SAMPLES] > 0 {
                 let n = snap[rinsynth_dsp::profile::SAMPLES];
                 info!(
-                    "profile cyc/sample: env={} ctrl={} osc={} filt={} (n={})",
+                    "profile cyc/sample: env={} ctrl={} osc={} filt={} fx={} (n={})",
                     snap[rinsynth_dsp::profile::ENV] / n,
                     snap[rinsynth_dsp::profile::CONTROL] / n,
                     snap[rinsynth_dsp::profile::OSC] / n,
                     snap[rinsynth_dsp::profile::FILTER] / n,
+                    snap[rinsynth_dsp::profile::FX] / n,
                     n
                 );
             }
             rinsynth_dsp::profile::reset();
             max_render_us = 0;
+            overruns = 0;
+            peak = 0.0;
         }
         FreeRtos::delay_ms(0);
     }

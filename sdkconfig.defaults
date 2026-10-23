@@ -28,6 +28,12 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 # DMA buffers anyway); internal RAM reserved for genuine DMA-capable allocs.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
+# Core 1 is a dedicated realtime audio render loop — it legitimately starves
+# IDLE1 under full polyphony. The default WDT idle-check then fires every 5s
+# and its backtrace printing stalls render ~20ms (making underruns worse).
+# The `late:` telemetry counter reports real overrun instead.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # Rust main() + logging needs more headroom than the 3.5K default

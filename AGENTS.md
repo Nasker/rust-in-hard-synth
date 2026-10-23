@@ -110,6 +110,65 @@ on the `/ws` URI (handler consumes whole frames; CLOSE handled by httpd too).
 `httpd_sock_err ... recv : 104/128` + "not properly masked" after a client
 closes without a WS CLOSE frame is expected teardown noise, not a bug.
 
+## DSP budget audit + overload control (2026-10-23)
+
+The "awful distortion depending on patch/voices" was **I2S underrun crackle**,
+not bus clipping: at 6 voices + heavy FX the render passed the 5.805 ms
+deadline and DMA starved (measured up to ~10 ms). A `peak:` meter in the
+per-second telemetry now shows the post-limiter level directly (>1.0 would be
+i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
+
+### Measured cost (instrumented build, cyc/sample; budget = 5442 @240 MHz)
+
+- Per voice ≈ 900 cyc/sample (osc ~590 for 4 PolyBLEPs, filt ~200, env ~105)
+- FX chain flat ~1115 cyc/sample idle → ~1400 with Tube distortion on;
+  Fuzz/Bitcrush are much cheaper (one preset measured fx=303 total)
+- Control/mod-matrix ~90-180 cyc/sample
+- Profiler probes add ~150 cyc/sample total overhead — an uninstrumented
+  build has ~5% more headroom
+- Extrapolated worst case (6 voices + all FX + distortion): ~6800 cyc/sample
+  ≈ 7.3 ms — **over deadline** → that is why 6-voice complex patches crackled
+
+### CPU governor (main.rs audio loop)
+
+- Every late block (`dt > BLOCK_US`) counts; 4 in a row → `dyn_cap -= 1` and
+  `vm.shed_voice()` fast-fades the least-important voice (oldest releasing
+  tail, else oldest non-bass held note) via a ~25 ms release — a fade, not a
+  click. `LeanVoice.cfgd_release` stores the configured release so the shed
+  doesn't permanently shorten that voice's release (restored on `note_on`).
+- Restore: after ~5 s of on-time blocks AND the worst block < 75% of the
+  deadline → cap +1 (margin check prevents boundary ping-pong)
+- User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
+  `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it
+- `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n` — Core 1 is a dedicated RT
+  render loop that legitimately starves IDLE1; the WDT backtrace itself
+  stalled render ~20 ms. Real overruns are reported via `late:` instead.
+
+### Distortion: already ported, now exposed
+
+The desktop `EffectsChain` (Distortion→Chorus→Delay→Reverb) already runs in
+`EmbeddedEngine`; 18 factory presets enable distortion (Tube/Fuzz/Bitcrush/
+Fold all used) with no UI control — that alone read as "distorts awfully".
+- UI: DISTORTION group in the effects column — On/Off, type buttons
+  (Tube/Fuzz/Crush/Fold), Drive + Mix sliders; preset JSON carries
+  `dt_e/dt_t/dt_d/dt_m` so loading a preset updates the controls
+- Hot path: `tanh` → Padé [3/3] (|err|≤0.02, saturates |x|>3), Fold `sin` →
+  `sine_lut` (explicit TAU wrap first — sine_lut only wraps ±1 turn),
+  per-sample `sqrt` level compensation cached in `set_drive`
+- Per-stage profiling: `profile::add` instrumentation in `embedded.rs`
+  (env/ctrl/osc/filt/fx counters, `pstage!` = one predictable branch when the
+  hook is off; `PROFILE_HOOK` const in main.rs installs the Xtensa `ccount`
+  reader — set false to reclaim probe overhead in production)
+
+### Remaining DSP notes
+
+- In the instrumented build the governor settles ~cap 2-3 under 4-osc +
+  all-FX load; uninstrumented should hold ~4. `HALF_RATE` (22050 synth +
+  Catmull-Rom upsample) remains the escape hatch if 6-voice full-rate is ever
+  required.
+- `peak:` telemetry answers "is it still clipping" at a glance; `late:`
+  answers "is it still underrunning". Both reset each ~1 s window.
+
 ## Conventions
 
 - No allocations / preset materialization in the audio loop

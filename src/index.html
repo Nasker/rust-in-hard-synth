@@ -369,12 +369,26 @@
         <div class="srow"><label>Glide s</label><input id="p-prt" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-prt">0.00</span></div>
         <div class="srow"><label>Width</label><input id="p-wth" type="range" min="0" max="2" step="0.02" value="1"><span class="val" id="v-wth">1.00</span></div>
         <div class="srow"><label>ModWhl</label><input id="p-mw" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-mw">0.00</span></div>
+        <div class="srow"><label>Poly</label><input id="p-pcap" type="range" min="1" max="6" step="1" value="6"><span class="val" id="v-pcap">6</span></div>
       </div>
     </div>
 
     <!-- COLUMN 4: EFFECTS & MASTER -->
     <div class="col">
       <div class="sec-hdr">EFFECTS CHAIN</div>
+      <div class="grp">
+        <div class="grp-title"><span>DISTORTION</span><span>WAVESHAPER</span></div>
+        <div class="wf-row" id="dte">
+          <button data-v="0" class="active">Off</button><button data-v="1">On</button>
+        </div>
+        <div class="wf-row" id="dtt">
+          <button data-v="0" class="active">Tube</button><button data-v="1">Fuzz</button>
+          <button data-v="2">Crush</button><button data-v="3">Fold</button>
+        </div>
+        <div class="srow"><label>Drive</label><input id="p-dt_d" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-dt_d">0.00</span></div>
+        <div class="srow"><label>Mix</label><input id="p-dt_m" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-dt_m">0.00</span></div>
+      </div>
+
       <div class="grp">
         <div class="grp-title"><span>CHORUS</span><span>QUADRATURE</span></div>
         <div class="srow"><label>Rate</label><input id="p-ch_r" type="range" min="0.1" max="5" step="0.05" value="0.8"><span class="val" id="v-ch_r">0.80</span></div>
@@ -556,7 +570,8 @@ function bindSlider(id, key, xform) {
  'o4l','o4s','o4c','o4pn','o4pw',
  'res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
  'e3a','e3d','e3s','e3r','mw','lrt','ldep','l2rt','l2dep',
- 'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol'].forEach(id => bindSlider(id, id));
+ 'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol',
+ 'dt_d','dt_m','pcap'].forEach(id => bindSlider(id, id));
 bindSlider('cut', 'cut', cutToHz);
 
 function bindGroup(id, key) {
@@ -571,6 +586,7 @@ function bindGroup(id, key) {
 bindGroup('w1', 'o1w'); bindGroup('w2', 'o2w'); bindGroup('w3', 'o3w'); bindGroup('w4', 'o4w');
 bindGroup('fmode', 'fmode');
 bindGroup('ldst', 'ldst'); bindGroup('lwf', 'lwf'); bindGroup('l2wf', 'l2wf');
+bindGroup('dte', 'dt_e'); bindGroup('dtt', 'dt_t');
 
 function setGroup(id, v) {
   document.querySelectorAll('#' + id + ' button').forEach(b =>
@@ -622,8 +638,10 @@ function applyPresetObj(s) {
   ['o1l','o2l','o3l','o4l','o1pw','o2pw','o3pw','o4pw','o2s','o2c','o3s','o3c','o4s','o4c','o1pn','o2pn','o3pn','o4pn',
    'cut','res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
    'e3a','e3d','e3s','e3r','lrt','ldep','l2rt','l2dep',
-   'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol'].forEach(k => setVal(k, s[k]));
+   'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol',
+   'dt_d','dt_m'].forEach(k => setVal(k, s[k]));
   setGroup('ldst', s.ldst); setGroup('lwf', s.lwf); setGroup('l2wf', s.l2wf);
+  setGroup('dte', s.dt_e); setGroup('dtt', s.dt_t);
   if (s.m) {
     s.m.forEach((slot, i) => {
       if (i >= 8) return;
