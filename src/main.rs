@@ -186,9 +186,10 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     );
     vm.set_master_volume(0.7);
 
-    // Per-stage cycle profiler — install only when needed; the probes
-    // themselves cost ~150 cyc/voice-sample (five rsr.ccount + atomics).
-    const PROFILE_HOOK: bool = true;
+    // Per-stage cycle profiler — install only for diagnostic builds; the
+    // probes themselves cost ~150 cyc/voice-sample (five rsr.ccount + atomics)
+    // which is real headroom in production. Set true when auditing.
+    const PROFILE_HOOK: bool = false;
     fn ccount() -> u64 {
         unsafe { esp_idf_sys::xthal_get_ccount() as u64 }
     }
