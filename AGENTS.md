@@ -131,13 +131,22 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 
 ### CPU governor (main.rs audio loop)
 
+- Warm-up: no shedding for the first `WARMUP_BLOCKS` (~10 s) — Wi-Fi/HTTP
+  bring-up starves the render core and would otherwise shed before the
+  user plays a note.
 - Every late block (`dt > BLOCK_US`) counts; 4 in a row → `dyn_cap -= 1`
   (floor 1 — a single voice always fits) and `shed_voice()` keeps firing
-  while *active* voices exceed the cap, fast-fading the least-important
-  voice (oldest releasing tail, else oldest non-bass held note) via a
-  ~25 ms release — a fade, not a click. `LeanVoice.cfgd_release` stores
-  the configured release so the shed doesn't permanently shorten that
-  voice's release (restored on `note_on`).
+  while *active* voices exceed the cap, fading the least-important voice
+  over ~70 ms. Priority: quietest release tail (>100 ms), then quietest
+  held non-bass above the cap, then quietest held non-bass anywhere;
+  Attack voices are never held-candidates (fresh notes mid-ramp read as
+  quiet but are the most audible loss). `LeanVoice.cfgd_release` stores
+  the configured release, restored on `note_on`.
+- CAUTION: `ADSREnvelope::release()` recomputes its decrement from the
+  *current* amplitude — re-releasing a fading voice restarts a full
+  fade, which pinned the governor in a zombie-shed loop until the
+  <=100 ms skip was added. Keep the shed fade below that threshold or
+  adjust both.
 - Restore: after ~5 s of on-time blocks AND the worst block < 75% of the
   deadline → cap +1 (margin check prevents boundary ping-pong)
 - User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
