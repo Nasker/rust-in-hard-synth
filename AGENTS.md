@@ -172,6 +172,17 @@ Fold all used) with no UI control — that alone read as "distorts awfully".
   hook is off; `PROFILE_HOOK` const in main.rs installs the Xtensa `ccount`
   reader — set false to reclaim probe overhead in production)
 
+### RF interference (audible ~10 Hz click — confirmed, mitigated)
+
+A periodic click audible in the DAC output was confirmed to be Wi-Fi TX
+bursts coupling into the analog path: dead silent during a `wstop`
+radio-off window. AP beacons fire ~every 102 ms (hardcoded 100-TU in
+esp-idf-svc) — hence ~8-10 Hz. Mitigations: `esp_wifi_set_max_tx_power(40)`
+(10 dBm) at boot — ~10x less burst energy; `wpow`/`wstop` cmd keys allow
+live tuning (wpow = quarter-dBm 4..80). If it persists: decouple the
+PCM5102 rail (ferrite bead + 100 nF/10 µF at VCC) and keep USB/I2S
+wiring away from the module antenna.
+
 ### Remaining DSP notes
 
 - SVF bypass: `LeanVoice.filter_bypass` skips the per-sample TPT update
