@@ -338,11 +338,18 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             overruns += 1;
             late_streak += 1;
             cool = 0;
-            if late_streak >= 4 && dyn_cap > 2 {
-                dyn_cap -= 1;
-                vm.set_voice_cap(dyn_cap);
-                if let Some(n) = vm.shed_voice() {
-                    info!("cpu-guard: 4 late blocks -> cap {} (shed note {})", dyn_cap, n);
+            if late_streak >= 4 {
+                // Lower the cap if possible (floor 1 — a single voice always
+                // fits the deadline), then shed while more voices are
+                // sounding than the cap allows.
+                if dyn_cap > 1 {
+                    dyn_cap -= 1;
+                    vm.set_voice_cap(dyn_cap);
+                }
+                if vm.active_voice_count() > dyn_cap {
+                    if let Some(n) = vm.shed_voice() {
+                        info!("cpu-guard: 4 late blocks -> cap {} (shed note {})", dyn_cap, n);
+                    }
                 } else {
                     info!("cpu-guard: 4 late blocks -> cap {}", dyn_cap);
                 }

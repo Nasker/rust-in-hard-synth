@@ -125,7 +125,7 @@ static WIFI: Mutex<Option<EspWifi<'static>>> = Mutex::new(None);
 static SAVED_SSID: Mutex<String> = Mutex::new(String::new());
 /// UI-configured polyphony ceiling — the audio-loop governor reads this every
 /// block and clamps its adaptive cap to it.
-static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(6);
+static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(5);
 /// Runtime rate toggle — the render loop reads this every block to choose
 /// between 256 direct frames (44.1 kHz) and 128 frames + Catmull-Rom 2x
 /// upsample (22.05 kHz).
