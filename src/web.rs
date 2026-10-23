@@ -926,6 +926,11 @@ pub fn start(modem: Modem<'static>) -> anyhow::Result<()> {
     wifi.start()?;
     unsafe {
         esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE);
+        // TX bursts (AP beacons ~10 Hz + traffic) couple into the DAC analog
+        // path as an audible periodic click (confirmed: silent with radio
+        // off). 10 dBm is plenty for a desk-range UI and ~10x less burst
+        // energy than the 20 dBm default. `wpow` can tune it at runtime.
+        esp_wifi_set_max_tx_power(40);
         // Wi-Fi config persists in NVS — re-assert the 11bgn protocol bitmap
         // explicitly so an earlier diagnostic b/g-only setting can't stick.
         let _ = esp_wifi_set_protocol(

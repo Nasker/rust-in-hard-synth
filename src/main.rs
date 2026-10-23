@@ -223,9 +223,9 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     const SEQ: [Option<usize>; 8] = [
         Some(0), None, Some(1), None, Some(2), Some(2), Some(3), None,
     ];
-    const STEP_BLOCKS: u32 = 40; // eighth note @ ~129 BPM
+    const STEP_BLOCKS: u32 = 80; // eighth note @ ~65 BPM — half-time feel
     const RIFF_VEL: u8 = 110;
-    const RIFF_LOOPS: u32 = 6; // ~7.5 s of intro, then silence
+    const RIFF_LOOPS: u32 = 4; // ~10 s of intro, then silence
 
     info!("engine: demo riff start");
     let mut blocks: u32 = 0;
