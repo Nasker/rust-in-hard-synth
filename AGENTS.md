@@ -131,15 +131,18 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 
 ### CPU governor (main.rs audio loop)
 
-- Every late block (`dt > BLOCK_US`) counts; 4 in a row → `dyn_cap -= 1` and
-  `vm.shed_voice()` fast-fades the least-important voice (oldest releasing
-  tail, else oldest non-bass held note) via a ~25 ms release — a fade, not a
-  click. `LeanVoice.cfgd_release` stores the configured release so the shed
-  doesn't permanently shorten that voice's release (restored on `note_on`).
+- Every late block (`dt > BLOCK_US`) counts; 4 in a row → `dyn_cap -= 1`
+  (floor 1 — a single voice always fits) and `shed_voice()` keeps firing
+  while *active* voices exceed the cap, fast-fading the least-important
+  voice (oldest releasing tail, else oldest non-bass held note) via a
+  ~25 ms release — a fade, not a click. `LeanVoice.cfgd_release` stores
+  the configured release so the shed doesn't permanently shorten that
+  voice's release (restored on `note_on`).
 - Restore: after ~5 s of on-time blocks AND the worst block < 75% of the
   deadline → cap +1 (margin check prevents boundary ping-pong)
 - User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
-  `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it
+  `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it.
+  Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)
 - `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n` — Core 1 is a dedicated RT
   render loop that legitimately starves IDLE1; the WDT backtrace itself
   stalled render ~20 ms. Real overruns are reported via `late:` instead.
@@ -162,6 +165,13 @@ Fold all used) with no UI control — that alone read as "distorts awfully".
 
 ### Remaining DSP notes
 
+- SVF bypass: `LeanVoice.filter_bypass` skips the per-sample TPT update
+  when the filter is audibly transparent — lowpass, cutoff at top clamp,
+  reso ≈ 0, AND no effective modulator (fenv ≈ 0, no LFO/mod-matrix route
+  to cutoff/reso; the implicit mod-wheel LFO1→cutoff route counts only
+  when wheel+depth > 0.01). ~150 cyc/sample/voice saved (filt 402→96 on
+  2 voices). Filter state resets on re-entry; conditions re-evaluated
+  each control tick so it never flaps mid-note.
 - In the instrumented build the governor settles ~cap 2-3 under 4-osc +
   all-FX load; uninstrumented should hold ~4. Half-rate rendering is now a
   runtime A/B: `SynthRate` UI buttons / `srate` cmd flip the engine 44100 ↔
