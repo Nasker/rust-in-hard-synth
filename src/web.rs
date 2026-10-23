@@ -473,6 +473,30 @@ fn handle_query_one(q: &str) {
         "vol" => CMD_RING.push(WebCmd::Param(SynthParam::MasterVolume, v)),
         "pcap" => CMD_RING.push(WebCmd::VoiceCap(v as u8)),
         "srate" => CMD_RING.push(WebCmd::SynthHalf(v != 0.0)),
+        "wstop" => {
+            // RF-interference diagnostic: bounce the radio for N seconds —
+            // if the periodic click in the audio path vanishes while the
+            // radio is down, it's TX-burst coupling, not a DSP artifact.
+            // The radio restarts automatically; the UI may need a refresh.
+            let secs = v.clamp(1.0, 60.0);
+            let _ = std::thread::Builder::new()
+                .stack_size(4096)
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    unsafe {
+                        esp_wifi_stop();
+                        std::thread::sleep(std::time::Duration::from_secs_f32(secs));
+                        esp_wifi_start();
+                        esp_wifi_connect();
+                    }
+                });
+        }
+        "wpow" => {
+            // TX power in quarter-dBm units (8 = 2 dBm .. 80 = 20 dBm).
+            unsafe {
+                esp_wifi_set_max_tx_power(v.clamp(4.0, 80.0) as i8);
+            }
+        }
         _ => {}
     }
 }

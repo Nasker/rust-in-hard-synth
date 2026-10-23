@@ -159,7 +159,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     preset.lfo_destination = model::lfo::LfoDestination::FilterCutoff;
     preset.lfo_rate = 0.4;
     preset.lfo_depth = 0.20;
-    preset.amp_release = 0.6;
+    preset.amp_release = 0.35; // brassy stab release — keeps riff overlap bounded
     preset.osc3_level = 0.45; // 3rd oscillator: -12 st sub-square active!
     // Enable lush stereo FX chain (Chorus -> Ping-Pong Delay -> Reverb)
     preset.chorus_enabled = true;
@@ -210,17 +210,32 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut synth = [model::types::StereoSample::ZERO; SYNTH_FRAMES];
     let mut hist = [model::types::StereoSample::ZERO; 4];
 
-    // Cmaj9-style arp loop: 8 steps, voices overlap and ring (poly mode).
-    const ARP: [u8; 8] = [48, 64, 67, 71, 74, 71, 67, 64];
-    const STEP_BLOCKS: u32 = 43; // ~250 ms
+    // Van Halen "Jump" intro riff: ascending triad stabs G → C → F → G in
+    // steady eighths at ~130 BPM. Each stab is 3 voices + release tails
+    // (peak ~5-6 active voices). Loops until any MIDI/Web note arrives.
+    const RIFF: &[[u8; 3]] = &[
+        [67, 71, 74], // G: G4 B4 D5
+        [72, 76, 79], // C: C5 E5 G5
+        [65, 69, 72], // F: F4 A4 C5
+        [67, 71, 74], // G
+    ];
+    // Eighth-note timeline: Some(i) = strike chord i, None = let it ring.
+    const SEQ: [Option<usize>; 8] = [
+        Some(0), None, Some(1), None, Some(2), Some(2), Some(3), None,
+    ];
+    const STEP_BLOCKS: u32 = 40; // eighth note @ ~129 BPM
+    const RIFF_VEL: u8 = 110;
+    const RIFF_LOOPS: u32 = 6; // ~7.5 s of intro, then silence
 
-    info!("engine: arp start");
+    info!("engine: demo riff start");
     let mut blocks: u32 = 0;
     let mut underruns: u32 = 0;
     let mut overruns: u32 = 0; // blocks whose render exceeded the DMA deadline
     let mut max_render_us: i64 = 0;
     let mut peak: f32 = 0.0;   // worst |sample| this second — >1.0 = limiter squashing
     let mut arp_active: bool = true;
+    let mut arp_done: bool = false;
+    let mut last_stab: Option<usize> = None;
 
     // CPU governor: when blocks render past the deadline the DMA underruns
     // (audible as harsh crackle, not clipping). Shed the oldest voice + lower
@@ -260,25 +275,35 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             }
         }
 
-        if arp_active && usb_midi::midi_seen() {
-            info!("usb-midi: first MIDI activity — stopping demo arp");
-            for &n in &ARP {
-                vm.receive_event(NoteEvent::note_off(n));
+        if arp_active && (usb_midi::midi_seen() || blocks >= RIFF_LOOPS * SEQ.len() as u32 * STEP_BLOCKS) {
+            if !arp_done {
+                info!("demo riff: done");
+                arp_done = true;
+            }
+            if arp_active {
+                for chord in RIFF {
+                    for &n in chord {
+                        vm.receive_event(NoteEvent::note_off(n));
+                    }
+                }
             }
             arp_active = false;
         }
 
-        if arp_active {
-            // note on this step's key
-            if blocks % STEP_BLOCKS == 0 {
-                let step = (blocks / STEP_BLOCKS) as usize;
-                vm.receive_event(NoteEvent::note_on_midi(ARP[step % ARP.len()], 104));
-            }
-            // release the key from 3 steps back — bounds voice count while
-            // letting release tails overlap
-            if blocks % STEP_BLOCKS == STEP_BLOCKS / 2 {
-                let step = ((blocks / STEP_BLOCKS) as usize).wrapping_sub(3);
-                vm.receive_event(NoteEvent::note_off(ARP[step % ARP.len()]));
+        if arp_active && blocks % STEP_BLOCKS == 0 {
+            let step = (blocks / STEP_BLOCKS) as usize % SEQ.len();
+            if let Some(chord) = SEQ[step] {
+                // Release the previous stab, then strike the next triad —
+                // tails overlap through the release so it stays brassy.
+                if let Some(prev) = last_stab {
+                    for &n in &RIFF[prev] {
+                        vm.receive_event(NoteEvent::note_off(n));
+                    }
+                }
+                for &n in &RIFF[chord] {
+                    vm.receive_event(NoteEvent::note_on_midi(n, RIFF_VEL));
+                }
+                last_stab = Some(chord);
             }
         }
 
