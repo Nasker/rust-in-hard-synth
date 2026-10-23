@@ -106,6 +106,10 @@ impl CmdRing {
 }
 
 static CMD_RING: CmdRing = CmdRing::new();
+/// Raw httpd handle stored as usize so a background thread can queue WS work.
+static HTTPD_HANDLE: AtomicUsize = AtomicUsize::new(0);
+/// Must match `max_open_sockets` in the httpd config below.
+const MAX_HTTPD_SESSIONS: usize = 12;
 static PRESETS_LIST_JSON: OnceLock<String> = OnceLock::new();
 static PRESET_DETAILS_JSON: OnceLock<Vec<String>> = OnceLock::new();
 static WIFI: Mutex<Option<EspWifi<'static>>> = Mutex::new(None);
@@ -313,7 +317,17 @@ fn preset_to_ui_json(p: &Preset) -> String {
     )
 }
 
+/// Parse one or more `;`-separated query commands (Web UI batches slider
+/// updates into a single WS frame to keep message rate bounded).
 fn handle_query(q: &str) {
+    for seg in q.split(';') {
+        if !seg.is_empty() {
+            handle_query_one(seg);
+        }
+    }
+}
+
+fn handle_query_one(q: &str) {
     let mut key = "";
     let mut val = "";
     let mut slot_idx = 0u8;
@@ -671,6 +685,65 @@ unsafe extern "C" fn cmd_get(req: *mut httpd_req_t) -> esp_err_t {
     httpd_resp_send(req, c"ok".as_ptr(), 2)
 }
 
+/// Runs in the httpd task context (via `httpd_queue_work`): send a
+/// server-initiated WS PING to `arg` (fd as pointer). A failed send means the
+/// session is wedged — trigger an async close to free the slot. The client's
+/// protocol-level PONG also refreshes the session's LRU counter so an active
+/// WS is never the eviction victim.
+unsafe extern "C" fn ws_ping_work(arg: *mut core::ffi::c_void) {
+    let hd = HTTPD_HANDLE.load(Ordering::Acquire) as httpd_handle_t;
+    if hd.is_null() {
+        return;
+    }
+    let fd = arg as i32;
+    // The fd may have been closed/reused since enumeration — only ping if it
+    // still belongs to a WS session, never inject frames into HTTP traffic.
+    if httpd_ws_get_fd_info(hd, fd) != httpd_ws_client_info_t_HTTPD_WS_CLIENT_WEBSOCKET {
+        return;
+    }
+    let mut f: httpd_ws_frame_t = core::mem::zeroed();
+    f.final_ = true;
+    f.type_ = httpd_ws_type_t_HTTPD_WS_TYPE_PING;
+    if httpd_ws_send_frame_async(hd, fd, &mut f) != ESP_OK {
+        let _ = httpd_sess_trigger_close(hd, fd);
+    }
+}
+
+/// Every 10 s enumerate httpd sessions and queue a WS PING for each live
+/// WebSocket client. Combined with TCP keep-alive this bounds stale-session
+/// lifetime (sleeping phones, dropped AP associations) to ~10-25 s, which is
+/// what kept all server sockets occupied and froze the UI after a while.
+fn start_ws_watchdog() {
+    let _ = std::thread::Builder::new()
+        .name("ws_ping".into())
+        .stack_size(3072)
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let hd = HTTPD_HANDLE.load(Ordering::Acquire) as httpd_handle_t;
+            if hd.is_null() {
+                continue;
+            }
+            unsafe {
+                let mut fds = [0i32; MAX_HTTPD_SESSIONS];
+                let mut n = fds.len();
+                if httpd_get_client_list(hd, &mut n, fds.as_mut_ptr()) != ESP_OK {
+                    continue;
+                }
+                for &fd in &fds[..n] {
+                    if httpd_ws_get_fd_info(hd, fd)
+                        == httpd_ws_client_info_t_HTTPD_WS_CLIENT_WEBSOCKET
+                    {
+                        let _ = httpd_queue_work(
+                            hd,
+                            Some(ws_ping_work),
+                            fd as *mut core::ffi::c_void,
+                        );
+                    }
+                }
+            }
+        });
+}
+
 unsafe extern "C" fn ws_get(req: *mut httpd_req_t) -> esp_err_t {
     if (*req).method == http_method_HTTP_GET as i32 {
         return ESP_OK; // completes the WebSocket handshake
@@ -684,12 +757,12 @@ unsafe extern "C" fn ws_get(req: *mut httpd_req_t) -> esp_err_t {
     }
 
     // Reject oversized frames by closing the session so unread bytes never
-    // corrupt the stream
-    if pkt.len > 255 {
+    // corrupt the stream. 1 KiB headroom fits a full batch of ~60 params.
+    if pkt.len > 1023 {
         return ESP_FAIL;
     }
 
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; 1024];
     if pkt.len > 0 {
         pkt.payload = buf.as_mut_ptr();
         let ret = httpd_ws_recv_frame(req, &mut pkt, pkt.len);
@@ -790,17 +863,26 @@ pub fn start(modem: Modem<'static>) -> anyhow::Result<()> {
             task_caps: MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
             server_port: 80,
             ctrl_port: 32768,
-            max_open_sockets: 7,
+            max_open_sockets: MAX_HTTPD_SESSIONS as u16,
             max_uri_handlers: 12,
             max_resp_headers: 8,
             backlog_conn: 5,
             lru_purge_enable: true,
-            recv_wait_timeout: 5,
-            send_wait_timeout: 5,
+            recv_wait_timeout: 2,
+            send_wait_timeout: 3,
+            // TCP keep-alive on every accepted socket: dead peers (phone
+            // slept/roamed mid-session) are detected in ~10+2x5 s and their
+            // session slots freed instead of lingering forever.
+            keep_alive_enable: true,
+            keep_alive_idle: 10,
+            keep_alive_interval: 5,
+            keep_alive_count: 2,
             ..Default::default()
         };
         let mut srv: httpd_handle_t = core::ptr::null_mut();
         esp!(httpd_start(&mut srv, &cfg))?;
+        HTTPD_HANDLE.store(srv as usize, Ordering::Release);
+        start_ws_watchdog();
 
         let uris = [
             httpd_uri_t {

@@ -14,6 +14,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use esp_idf_sys::*;
 use log::info;
+use std::sync::Mutex;
 use rinsynth_model::event::SynthEvent;
 
 // USB-MIDI Code Index Numbers (low nibble of packet byte 0)
@@ -78,6 +79,10 @@ impl SpscRing {
 }
 
 static RING: SpscRing = SpscRing::new();
+// The ring has TWO producers (usb_client task and the httpd task via the
+// Web UI keyboard) — serialize pushes so concurrent head/tail interleavings
+// can't drop or double-commit slots. The audio-side pop stays lock-free.
+static PUSH_LOCK: Mutex<()> = Mutex::new(());
 static SEEN: AtomicBool = AtomicBool::new(false);
 static EVENTS: AtomicUsize = AtomicUsize::new(0);
 static PENDING_PROG: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -112,6 +117,7 @@ pub fn pop_event() -> Option<SynthEvent> {
 pub fn push_event(ev: SynthEvent) {
     SEEN.store(true, Ordering::Relaxed);
     EVENTS.fetch_add(1, Ordering::Relaxed);
+    let _g = PUSH_LOCK.lock();
     RING.push(ev);
 }
 
@@ -169,6 +175,7 @@ unsafe fn parse_packet(p: &[u8]) {
         _ => return,
     };
     EVENTS.fetch_add(1, Ordering::Relaxed);
+    let _g = PUSH_LOCK.lock();
     RING.push(ev);
 }
 

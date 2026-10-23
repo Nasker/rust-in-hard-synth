@@ -500,15 +500,28 @@ setInterval(() => {
   }
 }, 2500);
 
-function sendRaw(q) {
-  if (ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 512) {
-    ws.send(q);
-  } else {
-    fetch('/cmd?' + q).catch(() => {});
+// Chunk a list of 'k=v' / 'k=..&v=..' commands into <=768B ';'-joined
+// batches so they always fit the server's 1KB WS frame limit.
+function sendBatch(items) {
+  let cur = '';
+  for (const q of items) {
+    const next = cur ? cur + ';' + q : q;
+    if (next.length > 768) { sendRaw(cur); cur = q; } else { cur = next; }
   }
+  if (cur) sendRaw(cur);
 }
 
-// Coalesce rapid slider drags at 30 Hz so touch drags never flood lwIP sockets
+function sendRaw(q) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(q); return; } catch (_) {}
+  }
+  fetch('/cmd?' + q).catch(() => {});
+}
+
+// Coalesce rapid slider drags: keep only the latest value per key, then
+// flush the whole dirty set in ONE batched message per tick. Never open
+// extra HTTP connections while the WS is merely backed up — that fallback
+// storm was a positive-feedback path to socket exhaustion.
 function cmd(key, q) {
   if (key === 'on' || key === 'off') {
     sendRaw(q);
@@ -518,11 +531,9 @@ function cmd(key, q) {
 }
 setInterval(() => {
   if (pendingParams.size === 0) return;
-  for (const [k, q] of pendingParams.entries()) {
-    sendRaw(q);
-    pendingParams.delete(k);
-    break; // 1 coalesced update per 25ms tick (40 Hz)
-  }
+  const batch = [...pendingParams.values()];
+  pendingParams.clear();
+  sendBatch(batch);
 }, 25);
 
 const cutToHz = t => Math.round(25 * Math.pow(800, t));
