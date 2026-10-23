@@ -729,6 +729,14 @@ fn start_ws_watchdog() {
                 if httpd_get_client_list(hd, &mut n, fds.as_mut_ptr()) != ESP_OK {
                     continue;
                 }
+                // DIAG: watch internal SRAM — lwIP pbufs live there; a leak
+                // starves multi-buffer (large-frame) TX allocs first.
+                log::info!(
+                    "mon: heap int={} total={} | httpd sessions={}",
+                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    esp_get_free_heap_size(),
+                    n
+                );
                 for &fd in &fds[..n] {
                     if httpd_ws_get_fd_info(hd, fd)
                         == httpd_ws_client_info_t_HTTPD_WS_CLIENT_WEBSOCKET
@@ -842,6 +850,12 @@ pub fn start(modem: Modem<'static>) -> anyhow::Result<()> {
     wifi.start()?;
     unsafe {
         esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE);
+        // Wi-Fi config persists in NVS — re-assert the 11bgn protocol bitmap
+        // explicitly so an earlier diagnostic b/g-only setting can't stick.
+        let _ = esp_wifi_set_protocol(
+            wifi_interface_t_WIFI_IF_AP,
+            (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N) as u8,
+        );
     }
     if let Ok(mut g) = WIFI.lock() {
         *g = Some(wifi);
@@ -920,6 +934,12 @@ pub fn start(modem: Modem<'static>) -> anyhow::Result<()> {
                 method: http_method_HTTP_GET,
                 handler: Some(ws_get),
                 is_websocket: true,
+                // httpd reads the frame's first byte itself, then only calls
+                // the handler for data frames UNLESS this flag is set. Without
+                // it, a client PING/PONG (browsers auto-PONG our watchdog's
+                // pings) leaves its remaining bytes in the socket, desyncs the
+                // stream, and the next parse fails "not properly masked".
+                handle_ws_control_frames: true,
                 ..Default::default()
             },
             // Captive portal probe paths for Android / iOS / Windows

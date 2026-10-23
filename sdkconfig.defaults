@@ -8,13 +8,25 @@ CONFIG_HTTPD_WS_SUPPORT=y
 # spare need headroom over the default of 10.
 CONFIG_LWIP_MAX_SOCKETS=16
 
+# A-MPDU TX was NOT the root cause (large frames died with or without it), but
+# a control-UI workload gains nothing from aggregation; keep it off to keep
+# the TX path simple.
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
 CONFIG_ESP32S3_SPIRAM_SUPPORT=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+# 16384 starves internal SRAM: every malloc <=16KB (voice structs, httpd/lwIP
+# bookkeeping) ate the pool DMA buffers need -> ~13KB free -> a single stalled
+# TCP session's ~7KB of TX pbufs nearly exhausted it and every big TX after
+# that silently died. Keep small allocs internal; let the rest use PSRAM.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+# lwIP/Wi-Fi buffers try PSRAM first (driver copies TX into its own internal
+# DMA buffers anyway); internal RAM reserved for genuine DMA-capable allocs.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
