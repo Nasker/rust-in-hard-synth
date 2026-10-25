@@ -11,18 +11,20 @@
 //!   usb_client — client event handling + MIDI interface discovery
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use esp_idf_sys::*;
 use log::info;
 use std::sync::Mutex;
 use rinsynth_model::event::SynthEvent;
 
 // USB-MIDI Code Index Numbers (low nibble of packet byte 0)
+const CIN_SYS_COMMON_1B: u8 = 0x5;
 const CIN_NOTE_OFF: u8 = 0x8;
 const CIN_NOTE_ON: u8 = 0x9;
 const CIN_CONTROL: u8 = 0xB;
 const CIN_PROGRAM: u8 = 0xC;
 const CIN_PITCH_BEND: u8 = 0xE;
+const CIN_SINGLE_BYTE: u8 = 0xF;
 
 const XFER_SIZE: usize = 256;
 const RING_CAP: usize = 128; // power of two
@@ -86,6 +88,9 @@ static PUSH_LOCK: Mutex<()> = Mutex::new(());
 static SEEN: AtomicBool = AtomicBool::new(false);
 static EVENTS: AtomicUsize = AtomicUsize::new(0);
 static PENDING_PROG: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Pending BPM estimated from incoming USB-MIDI Timing Clock (0xF8, 24 PPQN).
+/// `u32::MAX` means no new clock update since last audio-task poll.
+static PENDING_CLOCK_BPM: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// True once any MIDI packet has been observed — used to gate the demo
 /// arp off once a real keyboard is in play.
@@ -105,6 +110,16 @@ pub fn take_program_change() -> Option<u8> {
         None
     } else {
         Some(v as u8)
+    }
+}
+
+/// Take a pending MIDI Clock BPM update (20..300), if any.
+pub fn take_clock_bpm() -> Option<f32> {
+    let bits = PENDING_CLOCK_BPM.swap(u32::MAX, Ordering::AcqRel);
+    if bits == u32::MAX {
+        None
+    } else {
+        Some(f32::from_bits(bits))
     }
 }
 
@@ -149,10 +164,47 @@ static mut HOST: Host = Host {
     alt_setting: 0,
 };
 
+// MIDI Timing Clock (0xF8, 24 PPQN) state — only touched by `usb_client` task.
+static mut CLOCK_TICKS: u8 = 0;
+static mut CLOCK_LAST_US: i64 = 0;
+static mut CLOCK_BPM_EMA: f32 = 120.0;
+
+unsafe fn on_midi_clock_tick() {
+    let now = esp_timer_get_time();
+    let prev = CLOCK_LAST_US;
+    // Reset window on first tick or after >2 s gap (stopped clock / new song)
+    if prev == 0 || (now - prev) > 2_000_000 {
+        CLOCK_LAST_US = now;
+        CLOCK_TICKS = 0;
+        return;
+    }
+    CLOCK_TICKS += 1;
+    // Measure every 6 ticks (1/16 note = 0.25 beat) for low jitter + fast lock
+    if CLOCK_TICKS >= 6 {
+        let dt_us = (now - prev) as f32;
+        CLOCK_LAST_US = now;
+        CLOCK_TICKS = 0;
+        if dt_us > 25_000.0 && dt_us < 750_000.0 {
+            let inst_bpm = (15_000_000.0 / dt_us).clamp(20.0, 300.0);
+            CLOCK_BPM_EMA = if (CLOCK_BPM_EMA - inst_bpm).abs() > 15.0 {
+                inst_bpm
+            } else {
+                0.75 * CLOCK_BPM_EMA + 0.25 * inst_bpm
+            };
+            PENDING_CLOCK_BPM.store(CLOCK_BPM_EMA.to_bits(), Ordering::Release);
+        }
+    }
+}
+
 unsafe fn parse_packet(p: &[u8]) {
     let cin = p[0] & 0x0F;
+    let status = p[1];
     let d1 = p[2];
     let d2 = p[3];
+    if (cin == CIN_SINGLE_BYTE || cin == CIN_SYS_COMMON_1B) && status == 0xF8 {
+        on_midi_clock_tick();
+        return;
+    }
     let ev = match cin {
         CIN_NOTE_ON if d2 > 0 => {
             SEEN.store(true, Ordering::Relaxed);

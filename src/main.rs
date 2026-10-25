@@ -271,8 +271,14 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 let mut p = bank[idx].clone();
                 p.polyphony_mode = model::voice::PolyphonyMode::Poly;
                 vm.apply_preset(&p);
+                web::set_current_preset_index(idx);
+                web::set_current_bpm(vm.bpm());
                 info!("usb-midi: preset [{}] '{}' ({})", idx, p.name, p.category);
             }
+        }
+        if let Some(clock_bpm) = usb_midi::take_clock_bpm() {
+            vm.set_bpm(clock_bpm);
+            web::set_current_bpm(vm.bpm());
         }
 
         if arp_active && (usb_midi::midi_seen() || blocks >= RIFF_LOOPS * SEQ.len() as u32 * STEP_BLOCKS) {

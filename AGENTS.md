@@ -200,6 +200,38 @@ wiring away from the module antenna.
 - `peak:` telemetry answers "is it still clipping" at a glance; `late:`
   answers "is it still underrunning". Both reset each ~1 s window.
 
+### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
+
+- `EmbeddedEngine` stores `bpm` (20..300, default 120), `lfo1_sync`/`lfo1_beats`,
+  and `lfo2_sync`/`lfo2_beats` alongside `EffectsChain`'s `delay_sync`/`delay_beats`.
+- When synced, LFO rate in Hz is `(bpm / 60.0) / beats` and delay time in seconds
+  is `beats * 60.0 / bpm` (computed on parameter/BPM/preset change — zero extra
+  per-sample DSP cost). Disabling sync restores the stored unsynced Hz rate.
+- Web UI & command keys: `bpm`, `l1_s`/`l1_b`, `l2_s`/`l2_b`, `dl_s`/`dl_b`,
+  plus a browser **TAP** tempo button (`#tap-bpm`) and 10 beat divisions
+  (`4 Bars`=16 .. `1/32`=0.125, including `1/8D`=0.75 and `1/16D`=0.375).
+- USB-MIDI Timing Clock (`0xF8`, 24 PPQN) is tracked in `usb_midi.rs` over 6-tick
+  (1/16-note) windows with an EMA filter and auto-updates `vm.set_bpm(...)`.
+
+### Physical Hardware UI (OLED + Rotary Encoder + Pots + Buttons)
+
+- **Shared Core 0 control surface**: `web::push_cmd(WebCmd)` is mutex-serialized
+  on the producer side (`CMD_PUSH_LOCK`) while keeping the Core 1 audio consumer
+  lock-free, so a physical `ui_task` on Core 0 can push `WebCmd`s alongside the
+  HTTP/WS server. `web::current_bpm()`, `web::current_preset_index()`,
+  `web::user_voice_cap()`, and `web::BEAT_DIVISIONS` provide lock-free readouts
+  for an OLED status header.
+- **Pin & ADC rules**:
+  - Occupied: `GPIO 4, 5, 6, 7` (PCM5102 I2S), `GPIO 19, 20` (USB OTG),
+    `GPIO 43, 44` (UART0), `GPIO 26–37` (Flash/Octal PSRAM).
+  - **Analog pots MUST use `ADC1` (`GPIO 1–10`)** — `ADC2` (`GPIO 11–20`)
+    conflicts with Wi-Fi on ESP32-S3. Use 100 nF decoupling at each wiper +
+    software EMA + ~1% hysteresis deadband so Wi-Fi TX bursts don't jitter knobs.
+  - **Rotary encoder**: use hardware `PCNT` peripheral (e.g., `GPIO 38, 39`,
+    switch on `GPIO 40`) — zero CPU interrupt overhead.
+  - **OLED (128×64 SSD1306/SH1106)**: I2C @ 400 kHz–1 MHz (`GPIO 8, 9`) or SPI
+    DMA (`GPIO 10–13`), driven from a low-priority Core 0 task (~20–30 FPS).
+
 ## Conventions
 
 - No allocations / preset materialization in the audio loop

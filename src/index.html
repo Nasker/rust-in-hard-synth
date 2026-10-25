@@ -160,10 +160,12 @@
     background: rgba(10, 18, 32, 0.6); border: 1px solid var(--panel-border);
     border-radius: 4px; margin-bottom: 6px;
   }
-  .mrow select, .winput {
+  .mrow select, .winput, .div-sel {
     padding: 5px 6px; background: var(--bg-blue); color: var(--gold-light);
     border: 1px solid var(--toxic-dark); border-radius: 3px; font-size: 11px;
   }
+  .div-sel { padding: 2px 4px; font-size: 10px; }
+  input[type=range]:disabled, .div-sel:disabled { opacity: 0.35; cursor: not-allowed; }
   .mrow .slot-lbl { font: 11px monospace; color: var(--gold); font-weight: 700; }
   .mrow .arrow { color: var(--logo-red); text-align: center; font-weight: 800; }
 
@@ -350,6 +352,12 @@
           <button data-v="2" class="active">Cutoff</button><button data-v="3">Amp</button>
         </div>
         <div class="srow"><label>Rate Hz</label><input id="p-lrt" type="range" min="0.05" max="20" step="0.05" value="0.4"><span class="val" id="v-lrt">0.40</span></div>
+        <div class="srow"><label>Tempo</label>
+          <div class="wf-row" id="l1s" style="margin:0">
+            <button data-v="0" class="active">Free</button><button data-v="1">Sync</button>
+          </div>
+          <select id="p-l1_b" class="div-sel" disabled></select>
+        </div>
         <div class="srow"><label>Depth</label><input id="p-ldep" type="range" min="0" max="1" step="0.01" value="0.2"><span class="val" id="v-ldep">0.20</span></div>
       </div>
 
@@ -360,12 +368,19 @@
           <button data-v="2">Sqr</button><button data-v="3">Saw</button><button data-v="4">Rnd</button>
         </div>
         <div class="srow"><label>Rate Hz</label><input id="p-l2rt" type="range" min="0.05" max="20" step="0.05" value="3.0"><span class="val" id="v-l2rt">3.00</span></div>
+        <div class="srow"><label>Tempo</label>
+          <div class="wf-row" id="l2s" style="margin:0">
+            <button data-v="0" class="active">Free</button><button data-v="1">Sync</button>
+          </div>
+          <select id="p-l2_b" class="div-sel" disabled></select>
+        </div>
         <div class="srow"><label>Depth</label><input id="p-l2dep" type="range" min="0" max="1" step="0.01" value="0.0"><span class="val" id="v-l2dep">0.00</span></div>
       </div>
 
       <div class="sec-hdr">VOICE & PERFORMANCE</div>
       <div class="grp">
-        <div class="grp-title"><span>GLIDE / STEREO / WHEEL</span></div>
+        <div class="grp-title"><span>TEMPO / GLIDE / STEREO / WHEEL</span><button id="tap-bpm" class="btn-toxic" style="padding:1px 6px;font-size:9px">TAP</button></div>
+        <div class="srow"><label>BPM</label><input id="p-bpm" type="range" min="20" max="300" step="1" value="120"><span class="val" id="v-bpm">120</span></div>
         <div class="srow"><label>Glide s</label><input id="p-prt" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-prt">0.00</span></div>
         <div class="srow"><label>Width</label><input id="p-wth" type="range" min="0" max="2" step="0.02" value="1"><span class="val" id="v-wth">1.00</span></div>
         <div class="srow"><label>ModWhl</label><input id="p-mw" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-mw">0.00</span></div>
@@ -404,6 +419,12 @@
       <div class="grp">
         <div class="grp-title"><span>DELAY</span><span>PING-PONG</span></div>
         <div class="srow"><label>Time s</label><input id="p-dl_t" type="range" min="0.02" max="1.5" step="0.01" value="0.36"><span class="val" id="v-dl_t">0.36</span></div>
+        <div class="srow"><label>Tempo</label>
+          <div class="wf-row" id="dls" style="margin:0">
+            <button data-v="0" class="active">Free</button><button data-v="1">Sync</button>
+          </div>
+          <select id="p-dl_b" class="div-sel" disabled></select>
+        </div>
         <div class="srow"><label>Fdbk</label><input id="p-dl_fb" type="range" min="0" max="0.9" step="0.01" value="0.35"><span class="val" id="v-dl_fb">0.35</span></div>
         <div class="srow"><label>Mix</label><input id="p-dl_m" type="range" min="0" max="0.8" step="0.01" value="0.20"><span class="val" id="v-dl_m">0.20</span></div>
       </div>
@@ -576,8 +597,69 @@ function bindSlider(id, key, xform) {
  'res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
  'e3a','e3d','e3s','e3r','mw','lrt','ldep','l2rt','l2dep',
  'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol',
- 'dt_d','dt_m','pcap'].forEach(id => bindSlider(id, id));
+ 'dt_d','dt_m','pcap','bpm'].forEach(id => bindSlider(id, id));
 bindSlider('cut', 'cut', cutToHz);
+
+const DIVS = [
+  ['4 Bars', 16], ['2 Bars', 8], ['1 Bar', 4], ['1/2', 2], ['1/4', 1],
+  ['1/8D', 0.75], ['1/8', 0.5], ['1/16D', 0.375], ['1/16', 0.25], ['1/32', 0.125]
+];
+function bindSyncGroup(grpId, syncKey, beatId, beatKey, freeSliderId) {
+  const sel = document.getElementById('p-' + beatId);
+  const freeEl = document.getElementById('p-' + freeSliderId);
+  sel.innerHTML = DIVS.map(([lbl, b]) => `<option value="${b}"${b===1?' selected':''}>${lbl}</option>`).join('');
+  sel.addEventListener('change', () => cmd(beatKey, `k=${beatKey}&v=${sel.value}`));
+  document.querySelectorAll('#' + grpId + ' button').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('#' + grpId + ' button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      const on = +b.dataset.v === 1;
+      sel.disabled = !on;
+      if (freeEl) freeEl.disabled = on;
+      sendRaw(`k=${syncKey}&v=${b.dataset.v}`);
+    });
+  });
+}
+bindSyncGroup('l1s', 'l1_s', 'l1_b', 'l1_b', 'lrt');
+bindSyncGroup('l2s', 'l2_s', 'l2_b', 'l2_b', 'l2rt');
+bindSyncGroup('dls', 'dl_s', 'dl_b', 'dl_b', 'dl_t');
+
+function setSyncState(grpId, beatId, freeSliderId, syncVal, beatVal) {
+  if (syncVal !== undefined) {
+    setGroup(grpId, syncVal);
+    const on = +syncVal === 1;
+    const sel = document.getElementById('p-' + beatId);
+    const freeEl = document.getElementById('p-' + freeSliderId);
+    if (sel) sel.disabled = !on;
+    if (freeEl) freeEl.disabled = on;
+  }
+  if (beatVal !== undefined) {
+    const sel = document.getElementById('p-' + beatId);
+    if (sel) {
+      let best = DIVS[4][1], bestErr = 999;
+      for (const [, b] of DIVS) {
+        const err = Math.abs(b - beatVal);
+        if (err < bestErr) { bestErr = err; best = b; }
+      }
+      sel.value = best;
+    }
+  }
+}
+
+// Tap Tempo: average up to the last 4 intervals within a 2.5 s window
+const tapTimes = [];
+document.getElementById('tap-bpm').addEventListener('click', () => {
+  const now = performance.now();
+  if (tapTimes.length && now - tapTimes[tapTimes.length - 1] > 2500) tapTimes.length = 0;
+  tapTimes.push(now);
+  if (tapTimes.length > 5) tapTimes.shift();
+  if (tapTimes.length >= 2) {
+    const avgMs = (tapTimes[tapTimes.length - 1] - tapTimes[0]) / (tapTimes.length - 1);
+    const bpm = Math.max(20, Math.min(300, Math.round(60000 / avgMs)));
+    setVal('bpm', bpm);
+    sendRaw(`k=bpm&v=${bpm}`);
+  }
+});
 
 function bindGroup(id, key) {
   document.querySelectorAll('#' + id + ' button').forEach(b => {
@@ -645,9 +727,12 @@ function applyPresetObj(s) {
    'cut','res','fenv','fatk','fdec','fsus','frel','wth','atk','dec','sus','rel','prt',
    'e3a','e3d','e3s','e3r','lrt','ldep','l2rt','l2dep',
    'ch_r','ch_d','ch_m','dl_t','dl_fb','dl_m','rv_r','rv_d','rv_m','vol',
-   'dt_d','dt_m'].forEach(k => setVal(k, s[k]));
+   'dt_d','dt_m','bpm'].forEach(k => setVal(k, s[k]));
   setGroup('ldst', s.ldst); setGroup('lwf', s.lwf); setGroup('l2wf', s.l2wf);
   setGroup('dte', s.dt_e); setGroup('dtt', s.dt_t);
+  setSyncState('l1s', 'l1_b', 'lrt', s.l1_s, s.l1_b);
+  setSyncState('l2s', 'l2_b', 'l2rt', s.l2_s, s.l2_b);
+  setSyncState('dls', 'dl_b', 'dl_t', s.dl_s, s.dl_b);
   if (s.m) {
     s.m.forEach((slot, i) => {
       if (i >= 8) return;
