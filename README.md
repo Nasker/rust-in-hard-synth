@@ -18,6 +18,7 @@ Hardware firmware port of [RustInSynth](https://github.com/Nasker/RustInSynth) r
 - **3 ADSR envelopes per voice** — Amplitude (VCA), Filter (VCF), and auxiliary **Env 3** matrix source; preset changes update ADSR times in place without cutting active notes
 - **2 LFOs** — 5 waveforms each (Sine, Triangle, Square, Saw, Sample & Hold), free-running (`0.05–20 Hz`) or **tempo-synced** (`4 Bars` down to `1/32`, including dotted `1/8D` and `1/16D`)
 - **6-voice polyphonic pool** (default user cap of 5, adjustable `1–6` at runtime) with bass-note protection on voice stealing and portamento (glide)
+- **Mono mode + Unison** — classic monophonic voice with last-note-priority key stacking (release the top note, fall back to the held one below) and legato glide, plus a **unison stack** (`1–6` voices/note) with symmetric detune, stereo spread, and phase decorrelation for supersaw-style mono leads
 - **Adaptive CPU Governor** — monitors per-block render time against the `5.805 ms` DMA deadline; gracefully fast-fades (`~70 ms`) the quietest excess voice under extreme patches instead of crackling, and restores polyphony when headroom returns
 - **Runtime Sample-Rate A/B (`44.1 kHz` / `22.05 kHz`)** — live switchable between full-rate 44.1 kHz and 2× Catmull-Rom interpolated half-rate for 2× DSP headroom without retriggering held notes
 

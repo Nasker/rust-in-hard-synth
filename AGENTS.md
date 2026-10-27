@@ -213,6 +213,25 @@ wiring away from the module antenna.
 - USB-MIDI Timing Clock (`0xF8`, 24 PPQN) is tracked in `usb_midi.rs` over 6-tick
   (1/16-note) windows with an EMA filter and auto-updates `vm.set_bpm(...)`.
 
+### Mono Mode + Unison (key stack, legato, voice stacking)
+
+- `EmbeddedEngine` honors `preset.polyphony_mode` (and the `poly` cmd key /
+  Mode buttons in the UI) via `set_polyphony_mode`: no-op when unchanged, and
+  on a real switch the key stack is cleared + all voices released (desktop
+  `VoiceManager` semantics).
+- Mono uses a fixed-capacity last-note-priority `key_stack` (16 entries) —
+  releasing the sounding note falls back to the previous held note with its
+  original velocity (legato retrigger; portamento still glides), releasing a
+  non-top held note changes nothing.
+- Mono unison: `unison_voices` (1..6), `unison_detune` (cents, ±edge),
+  `unison_spread` (0..1) are Preset fields. `trigger_mono` fires
+  `min(unison, voice_cap)` voices with symmetric detune (`uni_mul` folded
+  into `set_osc_freqs`), linear stereo taper + 1/sqrt(n) loudness
+  compensation (`uni_gain`), and golden-ratio phase decorrelation on fresh
+  starts. Unison applies to Mono only — poly allocation/CPU is untouched.
+- Web UI & command keys: `poly` (0 Mono / 1 Poly), `uni`, `udet`, `uspr`;
+  preset JSON emits `poly`/`uni`/`udet`/`uspr` so loads update the controls.
+
 ### Physical Hardware UI (OLED + Rotary Encoder + Pots + Buttons)
 
 - **Shared Core 0 control surface**: `web::push_cmd(WebCmd)` is mutex-serialized

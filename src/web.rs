@@ -29,6 +29,7 @@ use rinsynth_model::lfo::LfoWaveform;
 use rinsynth_model::mod_matrix::{ModDest, ModSlot, ModSource};
 use rinsynth_model::params::SynthParam;
 use rinsynth_model::presets::Preset;
+use rinsynth_model::voice::PolyphonyMode;
 use std::net::UdpSocket;
 use std::sync::{Mutex, OnceLock};
 
@@ -78,6 +79,14 @@ pub enum WebCmd {
     Lfo2Beats(f32),
     DelaySync(bool),
     DelayBeats(f32),
+    /// Voice mode: true = Poly, false = Mono (key-stack + unison).
+    PolyMode(bool),
+    /// Mono-mode unison stack size (1..6).
+    Unison(u8),
+    /// Unison pitch spread in cents (0..50).
+    UniDetune(f32),
+    /// Unison stereo spread 0..1.
+    UniSpread(f32),
 }
 
 /// Shared note-division table (label, quarter-note beats) used by both the Web
@@ -323,6 +332,14 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
         WebCmd::Lfo2Beats(b) => vm.set_lfo2_beats(b),
         WebCmd::DelaySync(on) => vm.set_delay_sync(on),
         WebCmd::DelayBeats(b) => vm.set_delay_beats(b),
+        WebCmd::PolyMode(poly) => vm.set_polyphony_mode(if poly {
+            PolyphonyMode::Poly
+        } else {
+            PolyphonyMode::Mono
+        }),
+        WebCmd::Unison(n) => vm.set_unison_count(n as usize),
+        WebCmd::UniDetune(c) => vm.set_unison_detune(c),
+        WebCmd::UniSpread(s) => vm.set_unison_spread(s),
     }
 }
 
@@ -360,6 +377,7 @@ fn preset_to_ui_json(p: &Preset) -> String {
             "\"ldst\":{},\"lwf\":{},\"lrt\":{:.3},\"ldep\":{:.3},",
             "\"l2wf\":{},\"l2rt\":{:.3},\"l2dep\":{:.3},",
             "\"bpm\":{:.1},\"l1_s\":{},\"l1_b\":{:.4},\"l2_s\":{},\"l2_b\":{:.4},\"dl_s\":{},\"dl_b\":{:.4},",
+            "\"poly\":{},\"uni\":{},\"udet\":{:.1},\"uspr\":{:.2},",
             "\"dt_e\":{},\"dt_t\":{},\"dt_d\":{:.3},\"dt_m\":{:.3},",
         "\"ch_r\":{:.3},\"ch_d\":{:.3},\"ch_m\":{:.3},",
             "\"dl_t\":{:.3},\"dl_fb\":{:.3},\"dl_m\":{:.3},",
@@ -420,6 +438,10 @@ fn preset_to_ui_json(p: &Preset) -> String {
         p.lfo2_beats,
         if p.delay_sync { 1 } else { 0 },
         p.delay_beats,
+        if p.polyphony_mode == PolyphonyMode::Poly { 1 } else { 0 },
+        p.unison_voices,
+        p.unison_detune,
+        p.unison_spread,
         if p.distortion_enabled { 1 } else { 0 },
         p.distortion_type.index(),
         p.distortion_drive,
@@ -553,6 +575,10 @@ fn handle_query_one(q: &str) {
         "rv_d" => push_cmd(WebCmd::RevDamp(v)),
         "rv_m" => push_cmd(WebCmd::RevMix(v)),
         "vol" => push_cmd(WebCmd::Param(SynthParam::MasterVolume, v)),
+        "poly" => push_cmd(WebCmd::PolyMode(v != 0.0)),
+        "uni" => push_cmd(WebCmd::Unison(v as u8)),
+        "udet" => push_cmd(WebCmd::UniDetune(v)),
+        "uspr" => push_cmd(WebCmd::UniSpread(v)),
         "pcap" => push_cmd(WebCmd::VoiceCap(v as u8)),
         "srate" => push_cmd(WebCmd::SynthHalf(v != 0.0)),
         "wstop" => {
