@@ -199,7 +199,12 @@ wiring away from the module antenna.
   in place; 128 synth frames + Catmull-Rom 2x upsample, ~half render cost).
 - `peak:` telemetry answers "is it still clipping" at a glance; `late:`
   answers "is it still underrunning". Both reset each ~1 s window.
-- Output stage (EmbeddedEngine tail): smooth program compressor
+- Output stage (EmbeddedEngine tail): slow **AGC on the raw voice mix**
+  (`agc_env`/`agc_gain`, attack ~11 ms / release ~750 ms scaled by
+  `comp_rate_scale`) tucks hot sums toward 0.5 and returns up to +6 dB
+  of makeup on quiet mixes — program-level gain staging so downstream
+  stages see transients, not sustained heat. Then the smooth program
+  compressor
   (`comp_env`, threshold 0.60, ~1.5 ms attack) feeds a **look-ahead clip
   guard** — the signal runs through a 128-frame delay ring
   (~2.9 ms @ 44.1 kHz) while a monotonic max-queue tracks the window
