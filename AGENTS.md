@@ -199,6 +199,16 @@ wiring away from the module antenna.
   in place; 128 synth frames + Catmull-Rom 2x upsample, ~half render cost).
 - `peak:` telemetry answers "is it still clipping" at a glance; `late:`
   answers "is it still underrunning". Both reset each ~1 s window.
+- Output stage (EmbeddedEngine tail): smooth program compressor
+  (`comp_env`, threshold 0.60, ~1.5 ms attack) feeds a **look-ahead clip
+  guard** — the signal runs through a 128-frame delay ring
+  (~2.9 ms @ 44.1 kHz) while a monotonic max-queue tracks the window
+  peak, so `la_gain` has already converged to `CLIP_GUARD/peak` before a
+  transient exits the window. Attack coeff 0.12 (~50-sample ramp), release
+  0.0004 — both scaled by `comp_rate_scale` at half rate. Final `soft_clip`
+  (knee 0.75) is a last-resort rounding, and `embedded::soft_clip` is
+  `pub` — `main.rs` routes the Catmull-Rom upsampler outputs through it
+  too (CR overshoot previously hit a hard `clamp` → ugly clip).
 
 ### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
 
