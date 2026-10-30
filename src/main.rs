@@ -133,11 +133,20 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     );
 
     let free0 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
+    let spiram0 =
+        unsafe { esp_idf_sys::heap_caps_get_free_size(esp_idf_sys::MALLOC_CAP_SPIRAM) };
     info!("engine: free heap before vm = {}", free0);
     // Lean concrete engine — 6 voices × 3 PolyBLEP oscs + TPT SVF + ModMatrix + FX.
     let mut vm = EmbeddedEngine::new(6, SYNTH_RATE);
     let free1 = unsafe { esp_idf_sys::esp_get_free_heap_size() };
-    info!("engine: free heap after vm = {} (-{} bytes)", free1, free0 - free1);
+    let spiram1 =
+        unsafe { esp_idf_sys::heap_caps_get_free_size(esp_idf_sys::MALLOC_CAP_SPIRAM) };
+    info!(
+        "engine: free heap after vm = {} (-{} bytes, spiram -{})",
+        free1,
+        free0 - free1,
+        spiram0 - spiram1
+    );
     info!(
         "engine: stack hwm before preset = {}",
         unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
@@ -304,6 +313,11 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         Some(0), None, Some(1), None, Some(2), None, Some(3), None,
     ];
     const STEP_BLOCKS: u32 = 80; // eighth note @ ~65 BPM — half-time feel
+    // Stabs are struck 160 blocks apart; hold each for STAB_HOLD blocks
+    // then release — with the patch's 0.3 s tail (~52 blocks) every voice
+    // is fully idle ~40 blocks before the next strike, so the riff runs a
+    // strict 3 voices (~5.1 ms) instead of overlapping 5-6 into crackle.
+    const STAB_HOLD: u32 = 64;
     const RIFF_VEL: u8 = 110;
     const RIFF_LOOPS: u32 = 4; // ~10 s of intro, then silence
 
@@ -315,7 +329,8 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut peak: f32 = 0.0;   // worst |sample| this second — >1.0 = limiter squashing
     let mut arp_active: bool = true;
     let mut arp_done: bool = false;
-    let mut last_stab: Option<usize> = None;
+    // (chord index, block struck) — drives the timed stab release.
+    let mut last_stab: Option<(usize, u32)> = None;
     // True once a factory preset was chosen (USB program change or web
     // UI) — suppresses the post-riff play-patch swap so we don't stomp
     // a deliberate selection.
@@ -386,37 +401,58 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 }
             }
             arp_active = false;
+            last_stab = None;
         }
 
         if arp_active && blocks % STEP_BLOCKS == 0 {
             let step = (blocks / STEP_BLOCKS) as usize % SEQ.len();
             if let Some(chord) = SEQ[step] {
-                // Release the previous stab, then strike the next triad —
-                // tails overlap through the release so it stays brassy.
-                if let Some(prev) = last_stab {
-                    for &n in &RIFF[prev] {
-                        vm.receive_event(NoteEvent::note_off(n));
-                    }
-                }
                 for &n in &RIFF[chord] {
                     vm.receive_event(NoteEvent::note_on_midi(n, RIFF_VEL));
                 }
-                last_stab = Some(chord);
+                last_stab = Some((chord, blocks));
+            }
+        }
+        // Timed stab release — voices finish their 0.3 s tail well before
+        // the next strike lands, so nothing ever overlaps past 3 voices.
+        if let Some((chord, struck)) = last_stab {
+            if blocks.wrapping_sub(struck) == STAB_HOLD {
+                for &n in &RIFF[chord] {
+                    vm.receive_event(NoteEvent::note_off(n));
+                }
+                last_stab = None;
             }
         }
 
         let half = web::synth_half();
         let synth_frames = if half { FRAMES / 2 } else { FRAMES };
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
-        for i in 0..synth_frames {
-            let s = vm.next_sample_stereo();
-            if s.left.abs() > peak {
-                peak = s.left.abs();
+        if !half {
+            // Full rate: render straight into the i16 buffer — the synth[]
+            // intermediate only exists for the half-rate upsampler path.
+            for i in 0..FRAMES {
+                let s = vm.next_sample_stereo();
+                if s.left.abs() > peak {
+                    peak = s.left.abs();
+                }
+                if s.right.abs() > peak {
+                    peak = s.right.abs();
+                }
+                buf[2 * i] = (s.left * 32767.0) as i16;
+                buf[2 * i + 1] = (s.right * 32767.0) as i16;
             }
-            if s.right.abs() > peak {
-                peak = s.right.abs();
+        }
+        if half {
+            for i in 0..synth_frames {
+                let s = vm.next_sample_stereo();
+                if s.left.abs() > peak {
+                    peak = s.left.abs();
+                }
+                if s.right.abs() > peak {
+                    peak = s.right.abs();
+                }
+                synth[i] = s;
             }
-            synth[i] = s;
         }
         let dt = unsafe { esp_idf_sys::esp_timer_get_time() } - t0;
 
@@ -443,12 +479,6 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 buf[4 * i + 1] = (hist[2].right * 32767.0) as i16;
                 buf[4 * i + 2] = (soft_clip(mid_l) * 32767.0) as i16;
                 buf[4 * i + 3] = (soft_clip(mid_r) * 32767.0) as i16;
-            }
-        } else {
-            for i in 0..FRAMES {
-                let s = synth[i];
-                buf[2 * i] = (s.left * 32767.0) as i16;
-                buf[2 * i + 1] = (s.right * 32767.0) as i16;
             }
         }
         if dt > max_render_us {
