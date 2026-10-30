@@ -171,7 +171,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     preset.env3_decay = 0.5;
     preset.env3_sustain = 0.6;
     preset.env3_release = 0.4;
-    preset.amp_release = 0.4; // longer tail -> heavier voice overlap
+    preset.amp_release = 0.3; // tail rings ~half a step -> peak ~5 voices
     preset.osc3_level = 0.45; // 3rd oscillator: -12 st sub-square active!
     // 4th oscillator sounding — a detuned fifth Saw layer (also feeds the
     // Osc4 -> Osc1Pitch FM route below).
@@ -285,19 +285,23 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut hist = [model::types::StereoSample::ZERO; 4];
 
     // Van Halen "Jump" intro riff: ascending stab stabs G → C → F → G in
-    // steady eighths at ~130 BPM. Each stab is a 4-note chord (bass root +
-    // triad) so voices + release tails overlap past the 6-voice pool —
-    // deliberately exercising the stealing path under the heaviest patch.
-    // Loops until any MIDI/Web note arrives.
-    const RIFF: &[[u8; 4]] = &[
-        [55, 67, 71, 74], // G3 + G4 B4 D5
-        [60, 72, 76, 79], // C4 + C5 E5 G5
-        [53, 65, 69, 72], // F3 + F4 A4 C5
-        [55, 67, 71, 74], // G
+    // steady eighths at ~130 BPM. Each stab is a 3-note chord (bass root +
+    // third + fifth); alternating strikes + a 0.3 s release peak at ~4
+    // voices — measured on hardware that's the edge of the deadline for
+    // the full BootStress patch (4 oscs, FM, matrix, Tube + all FX fit only
+    // ~3.8 voices). This is the "heavy but just fits" rule of thumb: every
+    // engine feature is exercised, lates should stay near zero, and any
+    // regression shows up here first. Loops until any MIDI/Web note.
+    const RIFF: &[[u8; 3]] = &[
+        [55, 71, 74], // G3 B4 D5
+        [60, 76, 79], // C4 E5 G5
+        [53, 69, 72], // F3 A4 C5
+        [55, 71, 74], // G
     ];
     // Eighth-note timeline: Some(i) = strike chord i, None = let it ring.
+    // No adjacent strikes — tails decay before the next hit lands.
     const SEQ: [Option<usize>; 8] = [
-        Some(0), None, Some(1), None, Some(2), Some(2), Some(3), None,
+        Some(0), None, Some(1), None, Some(2), None, Some(3), None,
     ];
     const STEP_BLOCKS: u32 = 80; // eighth note @ ~65 BPM — half-time feel
     const RIFF_VEL: u8 = 110;

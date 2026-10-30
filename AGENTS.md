@@ -166,6 +166,12 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 - User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
   `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it.
   Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)
+- BootStress riff (main.rs): deliberately near-maximal patch (4 PolyBLEP
+  oscs, Osc4→Osc1Pitch FM, 3 matrix slots, Tube + Chorus + Delay +
+  Reverb) playing alternating 4-note stabs, release ~0.3 s → peak ~5
+  voices = "heavy but just fits" rule-of-thumb. If it ever crackles, a
+  real patch can too. On riff end/cancel it swaps to `Init+` unless the
+  user already picked a preset — never leave it as the play patch.
 - `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n` — Core 1 is a dedicated RT
   render loop that legitimately starves IDLE1; the WDT backtrace itself
   stalled render ~20 ms. Real overruns are reported via `late:` instead.
