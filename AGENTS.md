@@ -168,8 +168,12 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
   Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)
 - BootStress riff (main.rs): deliberately near-maximal patch (4 PolyBLEP
   oscs, Osc4→Osc1Pitch FM, 3 matrix slots, Tube + Chorus + Delay +
-  Reverb) playing alternating 4-note stabs, release ~0.3 s → peak ~5
-  voices = "heavy but just fits" rule-of-thumb. If it ever crackles, a
+  Reverb — fits only ~3.8 voices under the 5.8 ms deadline) playing
+  alternating 3-note stabs. Stabs release on a STAB_HOLD=64-block timer
+  (strikes land 160 blocks apart, 0.3 s tail ≈ 52 blocks) so voices go
+  idle ~40 blocks before the next hit — strict 3 voices ≈ 5.0 ms,
+  zero lates. Releasing at the *next* strike instead overlapped 5-6
+  voices and crackled; keep the timed release. If it ever crackles, a
   real patch can too. On riff end/cancel it swaps to `Init+` unless the
   user already picked a preset — never leave it as the play patch.
 - `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n` — Core 1 is a dedicated RT
