@@ -210,10 +210,12 @@ wiring away from the module antenna.
   - Post-FX `Master Volume` uses an audio-taper makeup curve
     `v * (0.75 + 0.75 * v)` (`0.0..1.0 -> 0.0..1.5`, up to `+3.5 dB` boost at
     full throw before the `0.90`-knee C1 `soft_clip`).
-  - Parameter de-zippering: `smooth_master_gain` glides per-sample (`0.0015`
-    one-pole, ~15 ms) and per-oscillator `gains` + `smooth_cutoff` glide
-    across control ticks so MIDI CC and 25 ms WebSocket slider updates never
-    click.
+  - Parameter de-zippering & per-sample LFO ramps: `smooth_master_gain`
+    glides per-sample (`0.0015` one-pole, ~15 ms), `smooth_cutoff` glides at
+    control rate, and per-oscillator stereo `gains` + `amp_lfo` ramp linearly
+    every audio sample (`gain_steps` / `amp_lfo_step` across the 64-sample
+    `CONTROL_DIV` interval with a 0.45 slew factor) so LFO modulation on
+    Balance/Pan or Volume/Tremolo never produces 689 Hz staircase "shizzle".
 
 ### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
 
