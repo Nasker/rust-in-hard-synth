@@ -134,19 +134,15 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 - Warm-up: no shedding for the first `WARMUP_BLOCKS` (~10 s) — Wi-Fi/HTTP
   bring-up starves the render core and would otherwise shed before the
   user plays a note.
-- **Tiered response — bandwidth first, notes last.** On a sustained late
-  rate (≥8 consecutive lates or ≥8 in the rolling 64-block `late_hist`
-  window) the governor's FIRST move is `gov_half` — the engine drops to
-  22.05 kHz render + Catmull-Rom 2x upsample, halving render cost while
-  every voice, FX stage and matrix route stays live. This tier is allowed
-  even during warm-up (it harms nothing). Only if the render is STILL
-  late at half rate does `dyn_cap -= 1` (floor 1) + `shed_voice()` run —
-  and only after `WARMUP_BLOCKS`. The old 4-consecutive-late rule could
-  collapse polyphony to mono on a single contention burst.
-- Restore order: cap +1 after ~2 s clean with worst block < 75% deadline
-  and < 4 lates in window; `gov_half` lifts after ~5 s clean when the
-  worst half-rate `dt` < 40% of `BLOCK_US` (~20% margin on the doubled
-  estimate — `dt` excludes the upsample/i16 pass).
+- Shedding is **rate-based, not streak-based**: `dyn_cap -= 1` (floor 1)
+  only on sustained overload — ≥12 consecutive lates (~70 ms solid
+  overrun) or ≥16 of the last 64 blocks late (~25%). A transient
+  Wi-Fi/PSRAM burst can no longer collapse polyphony to mono (the old
+  4-consecutive-late rule did exactly that, then took ~5 s/voice back).
+  NOTE: a governor-driven half-rate-render tier was tried and REVERTED —
+  the 22.05 kHz quality drop was plainly audible; user prefers shedding.
+- Restore: ~2 s of on-time blocks AND the worst block < 75% of the
+  deadline AND < 4 lates in the rolling window → cap +1.
 - `shed_voice()` keeps firing while *active* voices exceed the cap,
   fading the least-important voice over ~70 ms. Priority: quietest
   release tail (>100 ms), then quietest held non-bass above the cap,
@@ -163,10 +159,10 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
   `main.rs`): 4-note stabs (bass root + triad → tails overlap past the
   6-voice pool), all 4 PolyBLEP oscs sounding, Osc4→Osc1Pitch audio-rate
   FM + LFO2→Resonance + Env3→Osc3Pw matrix routes, and Distortion(Tube)
-  →Chorus→Delay→Reverb all on. Expected behavior: sustained lates →
-  `cpu-guard: ... -> half-rate render` early in the riff, NO shed
-  messages, `-> full-rate render` once the riff ends. If the riff ever
-  plays clean at full rate, every user patch has headroom to spare.
+  →Chorus→Delay→Reverb all on. It is deliberately over the full-rate
+  budget — expect early lates during warm-up, then `cpu-guard` sheds
+  until the render fits. If the riff ever plays clean start to finish,
+  every user patch has headroom to spare.
 - User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
   `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it.
   Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)
@@ -238,42 +234,18 @@ wiring away from the module antenna.
     every audio sample (`gain_steps` / `amp_lfo_step` across the 64-sample
     `CONTROL_DIV` interval with a 0.45 slew factor) so LFO modulation on
     Balance/Pan or Volume/Tremolo never produces 689 Hz staircase "shizzle".
-  - Synth-wide smoothing pass (no live-field steps): every continuous
-    parameter carries a live value that slews toward its target at control
-    rate — osc PW (`smooth_pw`), detune/semi/cents (`detune`/`target_detune`),
-    unison mul+gain (`uni_mul`, `uni_gain`+`uni_gain_step`), osc4 FM/RM
-    (`osc4_fm`/`osc4_rm` per-sample steps), pitch bend + matrix pitch
-    (`smooth_pitch`, `smooth_osc_pitch`), cutoff/oct/reso/fenv-amount
-    (`smooth_*`), stereo width (`smooth_width`), ADSR sustain (`sustain_slew`
-    ~5 ms). `note_on` snaps targets for fresh voices so attacks stay crisp.
-  - Discontinuous-switch declicks: waveform swaps dip the osc gain to zero
-    over ~64 samples then swap shape (`wf_pending`/`wf_fade`); filter mode
-    changes crossfade old/new SVF outputs (`filter.xfade`); each FX stage
-    has an enable gate (~11 ms fade, `fx_*_gate`) with reset-once when a
-    stage reaches silence — never `buffer.fill` while bypassed; distortion
-    type changes crossfade shaper outputs.
-  - Effects parameters are smoothed inside the processors: delay
-    time/feedback/mix + fractional-interpolated read head (no pitch chirp
-    on time drags), reverb mix + room-size/damping (feedback coefficients
-    converge instead of stepping), chorus depth/mix/rate, distortion
-    drive/mix/compensation.
-  - Smoothing CPU discipline (added after the pass pushed render past the
-    deadline on hardware): every smoother **snaps exactly to its target**
-    (`slew()` helper, |Δ| < 1e-5 → assign, never asymptote) so
-    `current != target` guards release. All per-sample ramp work is
-    skipped when settled: `ramping`/`wf_fading` flags gate the
-    gain/amp_lfo/uni steps, `osc_live` bitmask replaces per-osc `||`
-    chains, `gains`/`gain_steps` are hoisted to locals in `next_stereo`
-    (avoid &mut-self store/load round-trips), and `filter.set` +
-    `set_osc_freqs` only run when their inputs actually moved (skips
-    powf/divides — far more expensive on Xtensa soft-float than the
-    host benchmark shows). Never reintroduce unconditional per-sample
-    smoothing.
-  - Regression tests: `synth_wide_slider_moves_do_not_click`,
-    `fx_toggle_and_param_jumps_declick`, and
-    `waveform_filter_mode_and_preset_switches_stay_smooth` assert bounded
-    per-sample deltas (watch out: saw/square/noise edges have legitimate
-    fast deltas — tests must use low sines for the delta metric).
+  - NOTE: a synth-wide smoothing pass (smooth PW/detune/unison/FM-RM/
+    pitch/cutoff/reso/fenv-amount/width/sustain slews, waveform-change
+    gain dips, filter-mode crossfade, FX enable gates, distortion-type
+    crossfade, fractional delay reads, reverb room/damping convergence —
+    commits 107131a + 4c5f056 in RustInSynth) was REVERTED to a92f640 on
+    2026-10-30. It added enough per-sample/per-tick cost to push render
+    past the deadline on dense patches, and the user prefers occasional
+    switch clicks over any polyphony headroom loss. Kept: per-sample
+    `gain_steps`/`amp_lfo_step` LFO ramps (b5def12) and oscillator level
+    tapers (a92f640) — those predate the pass and were confirmed wanted.
+    Do not reintroduce broad parameter smoothing without a DSP budget
+    plan.
 
 ### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
 

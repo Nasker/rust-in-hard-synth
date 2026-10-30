@@ -301,10 +301,8 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
         }
         WebCmd::VoiceCap(n) => USER_VOICE_CAP.store(n as usize, Ordering::Relaxed),
         WebCmd::SynthHalf(on) => {
-            // The render loop is the single writer of the engine's sample
-            // rate (it ORs this flag with the governor's half-rate
-            // fallback and re-derives coefficients at the block boundary).
             SYNTH_HALF.store(on, Ordering::Relaxed);
+            vm.set_sample_rate(if on { 22_050 } else { 44_100 });
         }
         WebCmd::ChorusRate(v) => vm.effects.set_chorus_rate(v),
         WebCmd::ChorusDepth(v) => vm.effects.set_chorus_depth(v),
