@@ -134,12 +134,19 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 - Warm-up: no shedding for the first `WARMUP_BLOCKS` (~10 s) — Wi-Fi/HTTP
   bring-up starves the render core and would otherwise shed before the
   user plays a note.
-- Shedding is **rate-based, not streak-based**: a rolling 64-block history
-  (`late_hist`, one bit per block) must show sustained late RATE —
-  ≥8 lates in the window AND the current block late — before
-  `dyn_cap -= 1` (floor 1). A single Wi-Fi/PSRAM contention burst can no
-  longer collapse polyphony to mono (the old 4-consecutive-late rule did
-  exactly that, then took ~5 s/voice to recover).
+- **Tiered response — bandwidth first, notes last.** On a sustained late
+  rate (≥8 consecutive lates or ≥8 in the rolling 64-block `late_hist`
+  window) the governor's FIRST move is `gov_half` — the engine drops to
+  22.05 kHz render + Catmull-Rom 2x upsample, halving render cost while
+  every voice, FX stage and matrix route stays live. This tier is allowed
+  even during warm-up (it harms nothing). Only if the render is STILL
+  late at half rate does `dyn_cap -= 1` (floor 1) + `shed_voice()` run —
+  and only after `WARMUP_BLOCKS`. The old 4-consecutive-late rule could
+  collapse polyphony to mono on a single contention burst.
+- Restore order: cap +1 after ~2 s clean with worst block < 75% deadline
+  and < 4 lates in window; `gov_half` lifts after ~5 s clean when the
+  worst half-rate `dt` < 40% of `BLOCK_US` (~20% margin on the doubled
+  estimate — `dt` excludes the upsample/i16 pass).
 - `shed_voice()` keeps firing while *active* voices exceed the cap,
   fading the least-important voice over ~70 ms. Priority: quietest
   release tail (>100 ms), then quietest held non-bass above the cap,
@@ -152,15 +159,14 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
   fade, which pinned the governor in a zombie-shed loop until the
   <=100 ms skip was added. Keep the shed fade below that threshold or
   adjust both.
-- Restore: ~2 s of on-time blocks (16-block cooldown decrement per
-  on-time block, any late halves it) AND the worst block < 75% of the
-  deadline AND < 4 lates in the rolling window → cap +1.
-- Boot starts at `dyn_cap = 4` for the demo riff: with Chorus+Delay+
-  Reverb active, 5+ voices genuinely exceed the deadline (~6.5-6.9 ms
-  measured) and the warm-up shed exemption would let it crackle ~10 s
-  with no protection. Governor restores to the user ceiling once clean
-  margin returns (~2 s per voice). Measured on hardware: riff at cap 4 =
-  render max ~5.6-5.9 ms, 3 isolated lates over the whole riff.
+- The **boot riff is the standing worst case** ("BootStress" preset in
+  `main.rs`): 4-note stabs (bass root + triad → tails overlap past the
+  6-voice pool), all 4 PolyBLEP oscs sounding, Osc4→Osc1Pitch audio-rate
+  FM + LFO2→Resonance + Env3→Osc3Pw matrix routes, and Distortion(Tube)
+  →Chorus→Delay→Reverb all on. Expected behavior: sustained lates →
+  `cpu-guard: ... -> half-rate render` early in the riff, NO shed
+  messages, `-> full-rate render` once the riff ends. If the riff ever
+  plays clean at full rate, every user patch has headroom to spare.
 - User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
   `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it.
   Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)

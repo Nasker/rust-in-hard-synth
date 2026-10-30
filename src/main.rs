@@ -146,8 +146,14 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     // A factory pad, if the bank ships one — otherwise the default saw lead.
     // NB: factory_presets() materializes the whole 85-preset bank via one
     // giant vec! literal — at opt-level 0 that smashes the stack (and then
-    // the heap). For now: default "Init" lead preset, tastefully nudged.
+    // the heap). For now: default "Init" lead preset, pushed to the
+    // HEAVIEST setup the engine can run so the boot riff doubles as a
+    // standing worst-case stress test — 4 sounding PolyBLEP oscs/voice,
+    // Osc4 audio-rate FM + a live mod matrix, Tube distortion +
+    // Chorus + Ping-Pong Delay + Reverb all on. If this plays clean, any
+    // user patch fits too.
     let mut preset = model::presets::Preset::default();
+    preset.name = "BootStress".to_string();
     preset.polyphony_mode = model::voice::PolyphonyMode::Poly;
     preset.filter_cutoff = 1800.0;
     preset.filter_resonance = 0.50;
@@ -159,22 +165,58 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     preset.lfo_destination = model::lfo::LfoDestination::FilterCutoff;
     preset.lfo_rate = 0.4;
     preset.lfo_depth = 0.20;
-    preset.amp_release = 0.35; // brassy stab release — keeps riff overlap bounded
+    preset.lfo2_rate = 5.5;
+    preset.lfo2_depth = 0.45;
+    preset.env3_attack = 0.02;
+    preset.env3_decay = 0.5;
+    preset.env3_sustain = 0.6;
+    preset.env3_release = 0.4;
+    preset.amp_release = 0.4; // longer tail -> heavier voice overlap
     preset.osc3_level = 0.45; // 3rd oscillator: -12 st sub-square active!
-    // Enable lush stereo FX chain (Chorus -> Ping-Pong Delay -> Reverb)
+    // 4th oscillator sounding — a detuned fifth Saw layer (also feeds the
+    // Osc4 -> Osc1Pitch FM route below).
+    preset.osc4_waveform = model::event::WaveformType::Saw;
+    preset.osc4_level = 0.35;
+    preset.osc4_semitones = 7;
+    preset.osc4_pan = 0.25;
+    // Live mod matrix incl. the most expensive per-sample route
+    // (audio-rate Osc4 -> Osc1Pitch FM).
+    preset.mod_matrix.slots[0] = model::mod_matrix::ModSlot {
+        source: model::mod_matrix::ModSource::Osc4,
+        dest: model::mod_matrix::ModDest::Osc1Pitch,
+        amount: 0.12,
+        enabled: true,
+    };
+    preset.mod_matrix.slots[1] = model::mod_matrix::ModSlot {
+        source: model::mod_matrix::ModSource::Lfo2,
+        dest: model::mod_matrix::ModDest::FilterResonance,
+        amount: 0.30,
+        enabled: true,
+    };
+    preset.mod_matrix.slots[2] = model::mod_matrix::ModSlot {
+        source: model::mod_matrix::ModSource::Env3,
+        dest: model::mod_matrix::ModDest::Osc3Pw,
+        amount: 0.40,
+        enabled: true,
+    };
+    // Full stereo FX chain with the priciest stage (Tube distortion) on.
+    preset.distortion_enabled = true;
+    preset.distortion_type = model::effects::DistortionType::Tube;
+    preset.distortion_drive = 0.45;
+    preset.distortion_mix = 0.55;
     preset.chorus_enabled = true;
     preset.chorus_rate = 0.8;
     preset.chorus_depth = 3.5;
-    preset.chorus_mix = 0.22;
+    preset.chorus_mix = 0.25;
     preset.delay_enabled = true;
     preset.delay_time = 0.36;
     preset.delay_feedback = 0.35;
-    preset.delay_mix = 0.20;
+    preset.delay_mix = 0.22;
     preset.reverb_enabled = true;
-    preset.reverb_room_size = 0.55;
+    preset.reverb_room_size = 0.6;
     preset.reverb_damping = 0.45;
-    preset.reverb_mix = 0.20;
-    info!("engine: applying preset '{}' (TPT SVF + Chorus/Delay/Reverb)", preset.name);
+    preset.reverb_mix = 0.25;
+    info!("engine: applying preset '{}' (4 osc + FM + all FX + Tube)", preset.name);
     info!(
         "engine: stack hwm after Preset::default = {}",
         unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
@@ -210,14 +252,16 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut synth = [model::types::StereoSample::ZERO; SYNTH_FRAMES];
     let mut hist = [model::types::StereoSample::ZERO; 4];
 
-    // Van Halen "Jump" intro riff: ascending triad stabs G → C → F → G in
-    // steady eighths at ~130 BPM. Each stab is 3 voices + release tails
-    // (peak ~5-6 active voices). Loops until any MIDI/Web note arrives.
-    const RIFF: &[[u8; 3]] = &[
-        [67, 71, 74], // G: G4 B4 D5
-        [72, 76, 79], // C: C5 E5 G5
-        [65, 69, 72], // F: F4 A4 C5
-        [67, 71, 74], // G
+    // Van Halen "Jump" intro riff: ascending stab stabs G → C → F → G in
+    // steady eighths at ~130 BPM. Each stab is a 4-note chord (bass root +
+    // triad) so voices + release tails overlap past the 6-voice pool —
+    // deliberately exercising the stealing path under the heaviest patch.
+    // Loops until any MIDI/Web note arrives.
+    const RIFF: &[[u8; 4]] = &[
+        [55, 67, 71, 74], // G3 + G4 B4 D5
+        [60, 72, 76, 79], // C4 + C5 E5 G5
+        [53, 65, 69, 72], // F3 + F4 A4 C5
+        [55, 67, 71, 74], // G
     ];
     // Eighth-note timeline: Some(i) = strike chord i, None = let it ring.
     const SEQ: [Option<usize>; 8] = [
@@ -243,17 +287,24 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     // track the worst render over the clean window and only raise the cap if
     // it stayed under ~75% of the deadline (prevents cap boundary ping-pong).
     const MAX_VOICES: usize = 6;
-    // Start at cap 4 for the boot riff: with Chorus+Delay+Reverb on, 5+
-    // voices genuinely exceed the ~5.8 ms deadline, and the warm-up shed
-    // exemption would let it crackle for ~10 s with no protection. The
-    // governor restores voices quickly once clean render margin returns.
-    let mut dyn_cap: usize = 4;
+    // Boot at the full ceiling: the half-rate governor tier now protects
+    // even the deliberately-over-budget stress riff without touching a
+    // single note (see the shed logic below).
+    let mut dyn_cap: usize = MAX_VOICES;
     let mut late_streak: u32 = 0;
     // Rolling 64-block late/on-time history — sheds fire on late RATE,
     // not single streaks, so transient contention can't trigger them.
     let mut late_hist: u64 = 0;
     let mut cool: u32 = 0;
     let mut cool_max: i64 = 0;
+    // Governor-imposed half-rate render — the FIRST response to sustained
+    // overload. It keeps every voice, FX stage and routing live by trading
+    // bandwidth above ~10 kHz; voice shedding only happens when even
+    // half-rate rendering can't keep up.
+    let mut gov_half: bool = false;
+    let mut engine_half: bool = false;
+    let mut rate_cool: u32 = 0;
+    let mut rate_max: i64 = 0;
     vm.set_voice_cap(dyn_cap);
 
     loop {
@@ -320,7 +371,14 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             }
         }
 
-        let half = web::synth_half();
+        // Effective rate = user toggle || governor fallback. The render
+        // loop is the single writer of the engine's sample rate so the
+        // two can never disagree mid-note.
+        let half = web::synth_half() || gov_half;
+        if half != engine_half {
+            vm.set_sample_rate(if half { 22_050 } else { 44_100 });
+            engine_half = half;
+        }
         let synth_frames = if half { FRAMES / 2 } else { FRAMES };
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
         for i in 0..synth_frames {
@@ -389,28 +447,66 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             // polyphony to mono for 10+ seconds:
             //  - 12+ consecutive lates (~70 ms of solid overrun), or
             //  - >=25% late across the last 64 blocks (~370 ms window).
-            if blocks >= WARMUP_BLOCKS
-                && (late_streak >= 12 || late_hist.count_ones() >= 16)
-            {
-                // Lower the cap if possible (floor 1 — a single voice always
-                // fits the deadline), then shed while more voices are
-                // sounding than the cap allows.
-                if dyn_cap > 1 {
-                    dyn_cap -= 1;
-                    vm.set_voice_cap(dyn_cap);
-                }
-                if vm.active_voice_count() > dyn_cap {
-                    if let Some(n) = vm.shed_voice() {
-                        info!("cpu-guard: sustained lates -> cap {} (shed note {})", dyn_cap, n);
+            // Sustained-overload tiers. The half-rate drop only trades
+            // bandwidth, so it is allowed even during Wi-Fi bring-up —
+            // and it's what keeps the deliberately-over-budget boot riff
+            // clean without touching a note. Voice shedding stays
+            // warmup-exempt and is strictly the last resort.
+            if late_streak >= 8 || late_hist.count_ones() >= 8 {
+                if !half {
+                    gov_half = true;
+                    info!("cpu-guard: sustained lates -> half-rate render (cap {} kept)", dyn_cap);
+                    late_streak = 0;
+                    late_hist = 0;
+                } else if blocks >= WARMUP_BLOCKS
+                    && (late_streak >= 12 || late_hist.count_ones() >= 16)
+                {
+                    // Already at half rate (user or governor) and still
+                    // late — only then lower the cap (floor 1) and shed
+                    // while more voices are sounding than it allows.
+                    if dyn_cap > 1 {
+                        dyn_cap -= 1;
+                        vm.set_voice_cap(dyn_cap);
                     }
-                } else {
-                    info!("cpu-guard: sustained lates -> cap {}", dyn_cap);
+                    if vm.active_voice_count() > dyn_cap {
+                        if let Some(n) = vm.shed_voice() {
+                            info!("cpu-guard: sustained lates -> cap {} (shed note {})", dyn_cap, n);
+                        }
+                    } else {
+                        info!("cpu-guard: sustained lates -> cap {}", dyn_cap);
+                    }
+                    late_streak = 0;
+                    late_hist = 0;
                 }
-                late_streak = 0;
-                late_hist = 0;
             }
         } else {
             late_streak = 0;
+            // Restore full rate once a governor-dropped render has stayed
+            // comfortably inside the budget for ~5 s. dt at half rate
+            // covers 128 synth frames, so worst < deadline/2 means the
+            // same load fits 256 frames at full rate.
+            if gov_half && !web::synth_half() {
+                rate_cool += 1;
+                if dt > rate_max {
+                    rate_max = dt;
+                }
+                if rate_cool >= 860 {
+                    // dt covers only the 128 synth frames — upsample +
+                    // i16 conversion add ~0.2 ms more, so require a ~20%
+                    // margin on the doubled estimate to avoid flapping.
+                    if rate_max < BLOCK_US * 2 / 5 && late_hist.count_ones() == 0 {
+                        gov_half = false;
+                        info!("cpu-guard: sustained margin -> full-rate render");
+                    }
+                    // Re-measure the next ~1 s window from scratch — a
+                    // stale worst block must not latch the check forever.
+                    rate_max = 0;
+                    rate_cool = 860 - 172;
+                }
+            } else {
+                rate_cool = 0;
+                rate_max = 0;
+            }
             if dyn_cap < ceiling {
                 cool += 1;
                 if dt > cool_max {
