@@ -330,9 +330,10 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
 
         if half {
             // 2x upsample: even outputs pass the synth sample (one
-            // synth-frame delay), odd outputs get a Catmull-Rom midpoint
-            // (-p0 + 9p1 + 9p2 - p3) / 16. CR overshoots on transients, so
-            // all four writes go through soft_clip — never a hard clamp.
+            // synth-frame delay, already soft_clip-guarded in
+            // next_sample_stereo), odd outputs get a Catmull-Rom midpoint
+            // (-p0 + 9p1 + 9p2 - p3) / 16 rounded by soft_clip in case CR
+            // overshoots.
             for i in 0..synth_frames {
                 hist[0] = hist[1];
                 hist[1] = hist[2];
@@ -346,16 +347,16 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                     - hist[0].right
                     - hist[3].right)
                     * 0.0625;
-                buf[4 * i] = (soft_clip(hist[2].left) * 32767.0) as i16;
-                buf[4 * i + 1] = (soft_clip(hist[2].right) * 32767.0) as i16;
+                buf[4 * i] = (hist[2].left * 32767.0) as i16;
+                buf[4 * i + 1] = (hist[2].right * 32767.0) as i16;
                 buf[4 * i + 2] = (soft_clip(mid_l) * 32767.0) as i16;
                 buf[4 * i + 3] = (soft_clip(mid_r) * 32767.0) as i16;
             }
         } else {
             for i in 0..FRAMES {
                 let s = synth[i];
-                buf[2 * i] = (soft_clip(s.left) * 32767.0) as i16;
-                buf[2 * i + 1] = (soft_clip(s.right) * 32767.0) as i16;
+                buf[2 * i] = (s.left * 32767.0) as i16;
+                buf[2 * i + 1] = (s.right * 32767.0) as i16;
             }
         }
         if dt > max_render_us {

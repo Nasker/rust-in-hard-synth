@@ -199,23 +199,14 @@ wiring away from the module antenna.
   in place; 128 synth frames + Catmull-Rom 2x upsample, ~half render cost).
 - `peak:` telemetry answers "is it still clipping" at a glance; `late:`
   answers "is it still underrunning". Both reset each ~1 s window.
-- Output stage (EmbeddedEngine tail): **feedforward gain staging** —
-  each voice carries `peak_bound` (velocity × Σosc_level × 0.25 ×
-  amp_lfo × uni_gain), refreshed at note-on and every control tick;
-  the engine sums active bounds each sample and smooths
-  `stage_gain = min(0.55/bound, 1.6)` (fast tuck ~1 ms / slow boost
-  ~30 ms, scaled by `comp_rate_scale`) so hot mixes are attenuated
-  BEFORE their envelopes rise — the limiter sees transients, not bulk.
-  Then the smooth program compressor
-  (`comp_env`, threshold 0.60, ~1.5 ms attack) feeds a **look-ahead clip
-  guard** — the signal runs through a 128-frame delay ring
-  (~2.9 ms @ 44.1 kHz) while a monotonic max-queue tracks the window
-  peak, so `la_gain` has already converged to `CLIP_GUARD/peak` before a
-  transient exits the window. Attack coeff 0.12 (~50-sample ramp), release
-  0.0004 — both scaled by `comp_rate_scale` at half rate. Final `soft_clip`
-  (knee 0.75) is a last-resort rounding, and `embedded::soft_clip` is
-  `pub` — `main.rs` routes the Catmull-Rom upsampler outputs through it
-  too (CR overshoot previously hit a hard `clamp` → ugly clip).
+- Gain staging & output stage: static polyphonic headroom is budgeted at
+  the oscillator stage (`OSC_GAIN = 0.11`, ~-7 dB vs the old single-voice
+  `0.25`) with linear velocity response (`0.0..1.0`). No dynamic AGC,
+  feedforward voice-sum ducking, look-ahead limiter, or bus compressor is
+  used — playing more notes or striking harder scales volume naturally.
+  The output ends with a single C1-smooth `soft_clip` (`y = x` up to
+  `0.90`, asymptotic shoulder into `[-1.0, 1.0]`), also applied to the
+  Catmull-Rom midpoints in half-rate mode.
 
 ### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
 
