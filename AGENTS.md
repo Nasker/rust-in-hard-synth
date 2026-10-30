@@ -220,6 +220,30 @@ wiring away from the module antenna.
     every audio sample (`gain_steps` / `amp_lfo_step` across the 64-sample
     `CONTROL_DIV` interval with a 0.45 slew factor) so LFO modulation on
     Balance/Pan or Volume/Tremolo never produces 689 Hz staircase "shizzle".
+  - Synth-wide smoothing pass (no live-field steps): every continuous
+    parameter carries a live value that slews toward its target at control
+    rate — osc PW (`smooth_pw`), detune/semi/cents (`detune`/`target_detune`),
+    unison mul+gain (`uni_mul`, `uni_gain`+`uni_gain_step`), osc4 FM/RM
+    (`osc4_fm`/`osc4_rm` per-sample steps), pitch bend + matrix pitch
+    (`smooth_pitch`, `smooth_osc_pitch`), cutoff/oct/reso/fenv-amount
+    (`smooth_*`), stereo width (`smooth_width`), ADSR sustain (`sustain_slew`
+    ~5 ms). `note_on` snaps targets for fresh voices so attacks stay crisp.
+  - Discontinuous-switch declicks: waveform swaps dip the osc gain to zero
+    over ~64 samples then swap shape (`wf_pending`/`wf_fade`); filter mode
+    changes crossfade old/new SVF outputs (`filter.xfade`); each FX stage
+    has an enable gate (~11 ms fade, `fx_*_gate`) with reset-once when a
+    stage reaches silence — never `buffer.fill` while bypassed; distortion
+    type changes crossfade shaper outputs.
+  - Effects parameters are smoothed inside the processors: delay
+    time/feedback/mix + fractional-interpolated read head (no pitch chirp
+    on time drags), reverb mix + room-size/damping (feedback coefficients
+    converge instead of stepping), chorus depth/mix/rate, distortion
+    drive/mix/compensation.
+  - Regression tests: `synth_wide_slider_moves_do_not_click`,
+    `fx_toggle_and_param_jumps_declick`, and
+    `waveform_filter_mode_and_preset_switches_stay_smooth` assert bounded
+    per-sample deltas (watch out: saw/square/noise edges have legitimate
+    fast deltas — tests must use low sines for the delta metric).
 
 ### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
 
