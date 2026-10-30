@@ -199,14 +199,21 @@ wiring away from the module antenna.
   in place; 128 synth frames + Catmull-Rom 2x upsample, ~half render cost).
 - `peak:` telemetry answers "is it still clipping" at a glance; `late:`
   answers "is it still underrunning". Both reset each ~1 s window.
-- Gain staging & output stage: static polyphonic headroom is budgeted at
-  the oscillator stage (`OSC_GAIN = 0.11`, ~-7 dB vs the old single-voice
-  `0.25`) with linear velocity response (`0.0..1.0`). No dynamic AGC,
-  feedforward voice-sum ducking, look-ahead limiter, or bus compressor is
-  used — playing more notes or striking harder scales volume naturally.
-  The output ends with a single C1-smooth `soft_clip` (`y = x` up to
-  `0.90`, asymptotic shoulder into `[-1.0, 1.0]`), also applied to the
-  Catmull-Rom midpoints in half-rate mode.
+- Gain staging, SVF resonance & de-zippering:
+  - `OSC_GAIN = 0.085` (~-9.3 dB vs the old single-voice `0.25`) with linear
+    velocity (`0.0..1.0`).
+  - `TptSvf`: `in_gain = 1.0 / (1.0 + 1.1 * r * r)` pads high-Q inputs, and
+    the bandpass resonator state (`ic1`) uses a division-free C1-continuous
+    cubic soft saturator above `0.24` (asymptotes to `±0.40`, replacing the
+    old step-discontinuous clamp at `0.60`), keeping low-frequency resonant
+    fundamentals inside the per-voice budget.
+  - Post-FX `Master Volume` uses an audio-taper makeup curve
+    `v * (0.75 + 0.75 * v)` (`0.0..1.0 -> 0.0..1.5`, up to `+3.5 dB` boost at
+    full throw before the `0.90`-knee C1 `soft_clip`).
+  - Parameter de-zippering: `smooth_master_gain` glides per-sample (`0.0015`
+    one-pole, ~15 ms) and per-oscillator `gains` + `smooth_cutoff` glide
+    across control ticks so MIDI CC and 25 ms WebSocket slider updates never
+    click.
 
 ### Tempo Sync (LFO 1, LFO 2, Delay, and USB-MIDI Clock)
 
