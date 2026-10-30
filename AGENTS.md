@@ -134,21 +134,33 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 - Warm-up: no shedding for the first `WARMUP_BLOCKS` (~10 s) — Wi-Fi/HTTP
   bring-up starves the render core and would otherwise shed before the
   user plays a note.
-- Every late block (`dt > BLOCK_US`) counts; 4 in a row → `dyn_cap -= 1`
-  (floor 1 — a single voice always fits) and `shed_voice()` keeps firing
-  while *active* voices exceed the cap, fading the least-important voice
-  over ~70 ms. Priority: quietest release tail (>100 ms), then quietest
-  held non-bass above the cap, then quietest held non-bass anywhere;
-  Attack voices are never held-candidates (fresh notes mid-ramp read as
-  quiet but are the most audible loss). `LeanVoice.cfgd_release` stores
-  the configured release, restored on `note_on`.
+- Shedding is **rate-based, not streak-based**: a rolling 64-block history
+  (`late_hist`, one bit per block) must show sustained late RATE —
+  ≥8 lates in the window AND the current block late — before
+  `dyn_cap -= 1` (floor 1). A single Wi-Fi/PSRAM contention burst can no
+  longer collapse polyphony to mono (the old 4-consecutive-late rule did
+  exactly that, then took ~5 s/voice to recover).
+- `shed_voice()` keeps firing while *active* voices exceed the cap,
+  fading the least-important voice over ~70 ms. Priority: quietest
+  release tail (>100 ms), then quietest held non-bass above the cap,
+  then quietest held non-bass anywhere; Attack voices are never
+  held-candidates (fresh notes mid-ramp read as quiet but are the most
+  audible loss). `LeanVoice.cfgd_release` stores the configured release,
+  restored on `note_on`.
 - CAUTION: `ADSREnvelope::release()` recomputes its decrement from the
   *current* amplitude — re-releasing a fading voice restarts a full
   fade, which pinned the governor in a zombie-shed loop until the
   <=100 ms skip was added. Keep the shed fade below that threshold or
   adjust both.
-- Restore: after ~5 s of on-time blocks AND the worst block < 75% of the
-  deadline → cap +1 (margin check prevents boundary ping-pong)
+- Restore: ~2 s of on-time blocks (16-block cooldown decrement per
+  on-time block, any late halves it) AND the worst block < 75% of the
+  deadline AND < 4 lates in the rolling window → cap +1.
+- Boot starts at `dyn_cap = 4` for the demo riff: with Chorus+Delay+
+  Reverb active, 5+ voices genuinely exceed the deadline (~6.5-6.9 ms
+  measured) and the warm-up shed exemption would let it crackle ~10 s
+  with no protection. Governor restores to the user ceiling once clean
+  margin returns (~2 s per voice). Measured on hardware: riff at cap 4 =
+  render max ~5.6-5.9 ms, 3 isolated lates over the whole riff.
 - User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
   `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it.
   Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)
@@ -239,6 +251,18 @@ wiring away from the module antenna.
     on time drags), reverb mix + room-size/damping (feedback coefficients
     converge instead of stepping), chorus depth/mix/rate, distortion
     drive/mix/compensation.
+  - Smoothing CPU discipline (added after the pass pushed render past the
+    deadline on hardware): every smoother **snaps exactly to its target**
+    (`slew()` helper, |Δ| < 1e-5 → assign, never asymptote) so
+    `current != target` guards release. All per-sample ramp work is
+    skipped when settled: `ramping`/`wf_fading` flags gate the
+    gain/amp_lfo/uni steps, `osc_live` bitmask replaces per-osc `||`
+    chains, `gains`/`gain_steps` are hoisted to locals in `next_stereo`
+    (avoid &mut-self store/load round-trips), and `filter.set` +
+    `set_osc_freqs` only run when their inputs actually moved (skips
+    powf/divides — far more expensive on Xtensa soft-float than the
+    host benchmark shows). Never reintroduce unconditional per-sample
+    smoothing.
   - Regression tests: `synth_wide_slider_moves_do_not_click`,
     `fx_toggle_and_param_jumps_declick`, and
     `waveform_filter_mode_and_preset_switches_stay_smooth` assert bounded

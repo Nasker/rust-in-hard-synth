@@ -243,11 +243,18 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     // track the worst render over the clean window and only raise the cap if
     // it stayed under ~75% of the deadline (prevents cap boundary ping-pong).
     const MAX_VOICES: usize = 6;
-    let mut dyn_cap: usize = MAX_VOICES;
+    // Start at cap 4 for the boot riff: with Chorus+Delay+Reverb on, 5+
+    // voices genuinely exceed the ~5.8 ms deadline, and the warm-up shed
+    // exemption would let it crackle for ~10 s with no protection. The
+    // governor restores voices quickly once clean render margin returns.
+    let mut dyn_cap: usize = 4;
     let mut late_streak: u32 = 0;
+    // Rolling 64-block late/on-time history — sheds fire on late RATE,
+    // not single streaks, so transient contention can't trigger them.
+    let mut late_hist: u64 = 0;
     let mut cool: u32 = 0;
     let mut cool_max: i64 = 0;
-    vm.set_voice_cap(MAX_VOICES);
+    vm.set_voice_cap(dyn_cap);
 
     loop {
         // Early bring-up visibility: print every block for the first 20,
@@ -369,17 +376,22 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             dyn_cap = ceiling;
             vm.set_voice_cap(dyn_cap);
         }
-        if dt > BLOCK_US {
+        let late = dt > BLOCK_US;
+        late_hist = (late_hist << 1) | late as u64;
+        if late {
             // Rendering ran past the block's playback time — the I2S DMA
             // drains faster than we produce → audible underrun crackle.
             overruns += 1;
             late_streak += 1;
-            cool = 0;
-            // Warm-up: ignore late streaks for ~10 s after boot — the Wi-Fi
-            // connect + HTTP churn burst starves the render core and would
-            // shed voices before the user even plays, then take ~5 s/voice
-            // to restore. Overruns are still counted for telemetry.
-            if late_streak >= 4 && blocks >= WARMUP_BLOCKS {
+            cool = cool.saturating_sub(16);
+            // Shed only on SUSTAINED overload — a transient Wi-Fi/PSRAM
+            // burst makes a handful of blocks late and must not collapse
+            // polyphony to mono for 10+ seconds:
+            //  - 12+ consecutive lates (~70 ms of solid overrun), or
+            //  - >=25% late across the last 64 blocks (~370 ms window).
+            if blocks >= WARMUP_BLOCKS
+                && (late_streak >= 12 || late_hist.count_ones() >= 16)
+            {
                 // Lower the cap if possible (floor 1 — a single voice always
                 // fits the deadline), then shed while more voices are
                 // sounding than the cap allows.
@@ -389,12 +401,13 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 }
                 if vm.active_voice_count() > dyn_cap {
                     if let Some(n) = vm.shed_voice() {
-                        info!("cpu-guard: 4 late blocks -> cap {} (shed note {})", dyn_cap, n);
+                        info!("cpu-guard: sustained lates -> cap {} (shed note {})", dyn_cap, n);
                     }
                 } else {
-                    info!("cpu-guard: 4 late blocks -> cap {}", dyn_cap);
+                    info!("cpu-guard: sustained lates -> cap {}", dyn_cap);
                 }
                 late_streak = 0;
+                late_hist = 0;
             }
         } else {
             late_streak = 0;
@@ -403,10 +416,11 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 if dt > cool_max {
                     cool_max = dt;
                 }
-                // ~5 s of on-time blocks AND the worst block still had ≥25%
-                // headroom — only then is one more voice likely to fit.
-                if cool >= 860 {
-                    if cool_max < BLOCK_US * 3 / 4 {
+                // ~2 s of on-time blocks AND the worst block still had ≥25%
+                // headroom AND few recent lates — only then is one more
+                // voice likely to fit.
+                if cool >= 344 {
+                    if cool_max < BLOCK_US * 3 / 4 && late_hist.count_ones() < 4 {
                         dyn_cap += 1;
                         vm.set_voice_cap(dyn_cap);
                         info!("cpu-guard: margin ok (worst {}us) -> cap {}", cool_max, dyn_cap);
