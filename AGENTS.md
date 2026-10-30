@@ -201,7 +201,11 @@ wiring away from the module antenna.
   answers "is it still underrunning". Both reset each ~1 s window.
 - Gain staging, SVF resonance & de-zippering:
   - `OSC_GAIN = 0.085` (~-9.3 dB vs the old single-voice `0.25`) with linear
-    velocity (`0.0..1.0`).
+    velocity (`0.0..1.0`). Oscillator levels use `osc_level_gain`: a gentle
+    audio taper `x * (0.4 + 0.6 * x)` on pitched waveforms and a quadratic
+    taper `x * x * 0.65` on `WaveformType::Noise` so low slider values
+    (`0.01..0.15`) provide whisper-quiet "air" while `1.0` reaches full
+    equal-loudness output.
   - `TptSvf`: `in_gain = 1.0 / (1.0 + 1.1 * r * r)` pads high-Q inputs, and
     the bandpass resonator state (`ic1`) uses a division-free C1-continuous
     cubic soft saturator above `0.24` (asymptotes to `±0.40`, replacing the
