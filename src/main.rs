@@ -109,7 +109,11 @@ struct AudioTaskArgs {
 extern "C" fn audio_task_trampoline(arg: *mut core::ffi::c_void) {
     let args = unsafe { Box::from_raw(arg as *mut AudioTaskArgs) };
     if std::panic::catch_unwind(move || audio_task(args.tx, args.bank)).is_err() {
-        log::error!("audio task panicked — halting task");
+        // A panic in the render loop would leave the box silent forever —
+        // reboot into a working state instead (~1 s) like the IDF panic
+        // handler would have done without the catch_unwind.
+        log::error!("audio task panicked — restarting system");
+        unsafe { esp_idf_sys::esp_restart() }
     }
     unsafe { esp_idf_sys::vTaskDelete(core::ptr::null_mut()) }
 }
@@ -371,11 +375,13 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             preset_picked = true;
             if !bank.is_empty() {
                 let idx = (prog as usize) % bank.len();
-                let mut p = bank[idx].clone();
-                p.polyphony_mode = model::voice::PolyphonyMode::Poly;
-                vm.apply_preset(&p);
+                // No clone — apply_preset reads the preset by reference;
+                // cloning allocated on the RT thread every program change.
+                vm.apply_preset(&bank[idx]);
+                vm.set_polyphony_mode(model::voice::PolyphonyMode::Poly);
                 web::set_current_preset_index(idx);
                 web::set_current_bpm(vm.bpm());
+                let p = &bank[idx];
                 info!("usb-midi: preset [{}] '{}' ({})", idx, p.name, p.category);
             }
         }
