@@ -1,4 +1,4 @@
-# rinsynth-esp32 — Agent Context
+<# rinsynth-esp32 — Agent Context
 
 ESP32-S3 standalone synthesizer in Rust (esp-idf-svc / cargo-esp). Audio is
 synthesized on-device and output through a PCM5102 DAC. USB-MIDI host via the
@@ -209,6 +209,13 @@ wiring away from the module antenna.
 
 ### Remaining DSP notes
 
+- Voice pool is inline: `EmbeddedEngine.voices` is `[LeanVoice; MAX_VOICE_POOL=8]`
+  with `pool_len` bounding the usable subset (fw uses 6). NOT a `Vec` — a
+  ~3.9 KB heap alloc would land in PSRAM (>1 KB prefers SPIRAM under
+  `SPIRAM_MALLOC_ALWAYSINTERNAL=1024`) and force every per-sample voice
+  access over the octal bus. The engine struct lives on the audio task's
+  24 KB internal-RAM stack (~11 KB used after the change). Reverb/delay
+  buffers stay in PSRAM — too big for internal and only streamed.
 - SVF bypass: `LeanVoice.filter_bypass` skips the per-sample TPT update
   when the filter is audibly transparent — lowpass, cutoff at top clamp,
   reso ≈ 0, AND no effective modulator (fenv ≈ 0, no LFO/mod-matrix route
