@@ -74,6 +74,16 @@ fn main() -> anyhow::Result<()> {
     // so 24 KB gives >3x headroom while leaving ~110 KB internal RAM for lwIP/Wi-Fi.
     web::init_presets_json(&bank);
 
+    // Warm the lazy 8 KB sine LUT on a big-stack thread — its OnceLock init
+    // uses a multi-KB stack temporary, and the audio task's 24 KB stack is
+    // too tight for that to be safe lazily (seen as a boot crash loop).
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .name("dsp_prewarm".into())
+        .spawn(rinsynth_dsp::embedded::prewarm_dsp_tables)?
+        .join()
+        .expect("dsp prewarm panicked");
+
     let ctx = Box::new(AudioTaskArgs { tx, bank });
     unsafe {
         esp_idf_hal::task::create(
