@@ -18,6 +18,7 @@ use esp_idf_sys as _;
 use log::info;
 use rinsynth_model as model;
 
+mod status;
 mod usb_midi;
 mod web;
 
@@ -51,6 +52,10 @@ fn main() -> anyhow::Result<()> {
         .expect("model smoke test panicked");
 
     let p = Peripherals::take()?;
+
+    // Onboard WS2812 RGB (GPIO48, free per the pin budget) — blue blink
+    // until the web server is up, then dim green.
+    status::init(p.pins.gpio48);
 
     let std_cfg = StdConfig::new(
         Config::default(),
@@ -99,6 +104,9 @@ fn main() -> anyhow::Result<()> {
 
     if let Err(e) = web::start(modem) {
         log::error!("web: failed to start SoftAP/HTTP server: {:?}", e);
+        status::set(status::Status::Error);
+    } else {
+        status::set(status::Status::Ready);
     }
 
     // Install USB host on Core 0 (main task) so the USB OTG ISR lands on
@@ -373,6 +381,9 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         // Drain MIDI events queued by the USB task (block-boundary,
         // non-blocking — NoteEvents are Copy, ring is lock-free SPSC).
         while let Some(ev) = usb_midi::pop_event() {
+            if matches!(ev.kind, model::event::SynthEventKind::NoteOn) {
+                status::notify(status::Event::MidiActivity);
+            }
             vm.receive_event(ev);
         }
 
@@ -387,8 +398,9 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 let idx = (prog as usize) % bank.len();
                 // No clone — apply_preset reads the preset by reference;
                 // cloning allocated on the RT thread every program change.
+                // apply_preset already honors preset.polyphony_mode —
+                // don't override it here (that forced mono presets poly).
                 vm.apply_preset(&bank[idx]);
-                vm.set_polyphony_mode(model::voice::PolyphonyMode::Poly);
                 web::set_current_preset_index(idx);
                 web::set_current_bpm(vm.bpm());
                 let p = &bank[idx];
@@ -542,6 +554,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 } else {
                     info!("cpu-guard: sustained lates -> cap {}", dyn_cap);
                 }
+                status::notify(status::Event::Overload);
                 late_streak = 0;
                 late_hist = 0;
             }
