@@ -314,6 +314,10 @@ wiring away from the module antenna.
     switch on `GPIO 40`) — zero CPU interrupt overhead.
   - **OLED (128×64 SSD1306/SH1106)**: I2C @ 400 kHz–1 MHz (`GPIO 8, 9`) or SPI
     DMA (`GPIO 10–13`), driven from a low-priority Core 0 task (~20–30 FPS).
+  - **Status LED (`src/status.rs`)**: onboard WS2812 on `GPIO 48` via RMT
+    (`TxChannelDriver` + `SimpleEncoder`) behind `trait Indicator`; lock-free
+    atomic producer API (`status::set(Status)` / `status::notify(Event)`).
+  - Full state-machine / softkey / macro / arpeggiator plan lives in `PHYSICAL_UI.md`.
 
 ## Conventions
 
@@ -321,3 +325,5 @@ wiring away from the module antenna.
 - Prefer concrete static dispatch in `EmbeddedEngine` (no `dyn`)
 - Preset changes update ADSR params in place (never reset active voices)
 - Never log Wi-Fi passwords; bound NVS strings
+- **Gitflow**: `main` tracks stable/crystallized releases (tagged); active work
+  happens on `develop` and `feature/*` branches merged into `develop`.
