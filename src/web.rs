@@ -87,6 +87,14 @@ pub enum WebCmd {
     UniDetune(f32),
     /// Unison stereo spread 0..1.
     UniSpread(f32),
+    /// Arpeggiator on/off — handled on the audio task, not inside the engine.
+    ArpOn(bool),
+    /// Arp pattern index (0=Up, 1=Down, 2=UpDown, 3=Random).
+    ArpMode(u8),
+    /// Beats per arp step (0.25 = 1/16 note).
+    ArpRate(f32),
+    /// Octave span of the arp sequence (1..=4).
+    ArpOct(u8),
 }
 
 /// Shared note-division table (label, quarter-note beats) used by both the Web
@@ -383,6 +391,9 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
         WebCmd::Unison(n) => vm.set_unison_count(n as usize),
         WebCmd::UniDetune(c) => vm.set_unison_detune(c),
         WebCmd::UniSpread(s) => vm.set_unison_spread(s),
+        // Arp commands are consumed by the audio-task scheduler before
+        // they ever reach apply_cmd — kept here for exhaustiveness.
+        WebCmd::ArpOn(_) | WebCmd::ArpMode(_) | WebCmd::ArpRate(_) | WebCmd::ArpOct(_) => {}
     }
 }
 
@@ -614,6 +625,10 @@ fn handle_query_one(q: &str) {
         "dl_t" => push_cmd(WebCmd::DelayTime(v)),
         "dl_fb" => push_cmd(WebCmd::DelayFb(v)),
         "dl_m" => push_cmd(WebCmd::DelayMix(v)),
+        "ar_e" => push_cmd(WebCmd::ArpOn(v != 0.0)),
+        "ar_m" => push_cmd(WebCmd::ArpMode(v as u8)),
+        "ar_r" => push_cmd(WebCmd::ArpRate(v)),
+        "ar_o" => push_cmd(WebCmd::ArpOct(v as u8)),
         "rv_r" => push_cmd(WebCmd::RevRoom(v)),
         "rv_d" => push_cmd(WebCmd::RevDamp(v)),
         "rv_m" => push_cmd(WebCmd::RevMix(v)),

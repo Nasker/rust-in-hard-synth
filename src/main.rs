@@ -278,6 +278,12 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         "engine: stack hwm after apply_preset = {}",
         unsafe { esp_idf_sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) }
     );
+
+    // Tempo-synced arpeggiator — a block-boundary note scheduler, NOT DSP.
+    // It intercepts NoteOn/NoteOff (when enabled) and re-emits arpeggiated
+    // events into the engine on the next block boundary. Zero per-sample cost.
+    let mut arp = rinsynth_dsp::Arpeggiator::new();
+    arp.apply_preset(&preset);
     // What the user actually plays once the stress riff ends — the old
     // nudged Init (3 oscs, Chorus+Delay+Reverb, no distortion, no matrix).
     // BootStress must stay a boot-only diagnostic: left as the live patch
@@ -370,8 +376,8 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut overruns: u32 = 0; // blocks whose render exceeded the DMA deadline
     let mut max_render_us: i64 = 0;
     let mut peak: f32 = 0.0;   // worst |sample| this second — >1.0 = limiter squashing
-    let mut arp_active: bool = true;
-    let mut arp_done: bool = false;
+    let mut riff_active: bool = true;
+    let mut riff_done_flag: bool = false;
     // (chord index, block struck) — drives the timed stab release.
     let mut last_stab: Option<(usize, u32)> = None;
     // True once a factory preset was chosen (USB program change or web
@@ -402,15 +408,40 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         // Drain MIDI events queued by the USB task (block-boundary,
         // non-blocking — NoteEvents are Copy, ring is lock-free SPSC).
         while let Some(ev) = usb_midi::pop_event() {
-            if matches!(ev.kind, model::event::SynthEventKind::NoteOn) {
+            use model::event::SynthEventKind as K;
+            if matches!(ev.kind, K::NoteOn) {
                 status::notify(status::Event::MidiActivity);
             }
-            vm.receive_event(ev);
+            // When the arpeggiator is on it swallows note events into its
+            // held-chord list; everything else flows straight to the engine.
+            if arp.enabled() {
+                match ev.kind {
+                    K::NoteOn => arp.note_on(ev.note, ev.velocity),
+                    K::NoteOff => {
+                        // Untracked notes (struck before the arp engaged)
+                        // must still release their engine voice.
+                        if let Some(fwd) = arp.note_off(ev.note) {
+                            vm.receive_event(fwd);
+                        }
+                    }
+                    _ => vm.receive_event(ev),
+                }
+            } else {
+                vm.receive_event(ev);
+            }
         }
 
         // Drain Web UI parameter/FX updates (lock-free SPSC ring from Core 0)
         while let Some(cmd) = web::pop_cmd() {
-            web::apply_cmd(&mut vm, cmd);
+            match cmd {
+                web::WebCmd::ArpOn(on) => arp.set_enabled(on),
+                web::WebCmd::ArpMode(m) => {
+                    arp.set_mode(model::arp::ArpMode::from_index(m))
+                }
+                web::WebCmd::ArpRate(b) => arp.set_rate_beats(b),
+                web::WebCmd::ArpOct(o) => arp.set_octaves(o),
+                other => web::apply_cmd(&mut vm, other),
+            }
         }
 
         if let Some(prog) = usb_midi::take_program_change() {
@@ -422,6 +453,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 // apply_preset already honors preset.polyphony_mode —
                 // don't override it here (that forced mono presets poly).
                 vm.apply_preset(&bank[idx]);
+                arp.apply_preset(&bank[idx]);
                 web::set_current_preset_index(idx);
                 web::set_current_bpm(vm.bpm());
                 let p = &bank[idx];
@@ -433,28 +465,29 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             web::set_current_bpm(vm.bpm());
         }
 
-        if arp_active && (usb_midi::midi_seen() || blocks >= RIFF_LOOPS * SEQ.len() as u32 * STEP_BLOCKS) {
-            if !arp_done {
+        if riff_active && (usb_midi::midi_seen() || blocks >= RIFF_LOOPS * SEQ.len() as u32 * STEP_BLOCKS) {
+            if !riff_done_flag {
                 info!("demo riff: done");
-                arp_done = true;
+                riff_done_flag = true;
                 web::set_riff_done(true);
                 if !preset_picked {
                     vm.apply_preset(&play_preset);
+                    arp.apply_preset(&play_preset);
                     info!("engine: stress riff over -> play patch '{}'", play_preset.name);
                 }
             }
-            if arp_active {
+            if riff_active {
                 for chord in RIFF {
                     for &n in chord {
                         vm.receive_event(NoteEvent::note_off(n));
                     }
                 }
             }
-            arp_active = false;
+            riff_active = false;
             last_stab = None;
         }
 
-        if arp_active && blocks % STEP_BLOCKS == 0 {
+        if riff_active && blocks % STEP_BLOCKS == 0 {
             let step = (blocks / STEP_BLOCKS) as usize % SEQ.len();
             if let Some(chord) = SEQ[step] {
                 for &n in &RIFF[chord] {
@@ -476,6 +509,19 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
 
         let half = web::synth_half();
         let synth_frames = if half { FRAMES / 2 } else { FRAMES };
+
+        // Arpeggiator scheduler — emits its step events on the block
+        // boundary at the *synth* rate (half rate halves sample count too).
+        if arp.enabled() {
+            let eff_rate = if half {
+                SYNTH_RATE as f32 * 0.5
+            } else {
+                SYNTH_RATE as f32
+            };
+            arp.tick(synth_frames as u32, vm.bpm(), eff_rate, &mut |ev| {
+                vm.receive_event(ev)
+            });
+        }
         let t0 = unsafe { esp_idf_sys::esp_timer_get_time() };
         if !half {
             // Full rate: render straight into the i16 buffer — the synth[]

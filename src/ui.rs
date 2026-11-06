@@ -77,6 +77,10 @@ pub enum ParamTarget {
     UnisonVoices,
     UnisonDetune,
     UnisonSpread,
+    ArpOn,
+    ArpMode,
+    ArpRate,
+    ArpOct,
 }
 
 impl ParamTarget {
@@ -148,6 +152,42 @@ impl ParamTarget {
             Self::UnisonVoices => WebCmd::Unison((1 + (pct as u16 * 5) / 100) as u8),
             Self::UnisonDetune => WebCmd::UniDetune(norm * 50.0),
             Self::UnisonSpread => WebCmd::UniSpread(norm),
+            Self::ArpOn => WebCmd::ArpOn(pct >= 50),
+            Self::ArpMode => WebCmd::ArpMode(((pct as u16 * 4) / 100).min(3) as u8),
+            Self::ArpRate => {
+                // Stepped beat divisions, slow -> fast: 1/2 .. 1/32.
+                const DIVS: [f32; 7] = [2.0, 1.0, 0.75, 0.5, 0.375, 0.25, 0.125];
+                let idx = ((pct as usize) * DIVS.len() / 101).min(DIVS.len() - 1);
+                WebCmd::ArpRate(DIVS[idx])
+            }
+            Self::ArpOct => WebCmd::ArpOct((1 + (pct as u16 * 4) / 100).min(4) as u8),
+        }
+    }
+
+    /// Human-readable label for discrete/stepped parameters (shown instead
+    /// of the raw 0-100 number on the SECTION page). `None` = numeric.
+    pub fn value_label(self, pct: u8) -> Option<&'static str> {
+        let wave = ["SIN", "SQR", "SAW", "TRI", "NSE", "PLS"];
+        match self {
+            Self::ArpOn => Some(if pct >= 50 { "ON" } else { "OFF" }),
+            Self::PolyMode => Some(if pct >= 50 { "POLY" } else { "MONO" }),
+            Self::ArpMode => Some(
+                ["UP", "DOWN", "U/DN", "RND"][((pct as usize * 4) / 100).min(3)],
+            ),
+            Self::ArpRate => Some(
+                ["1/2", "1/4", "1/8D", "1/8", "16D", "1/16", "1/32"]
+                    [(pct as usize * 7 / 101).min(6)],
+            ),
+            Self::ArpOct => {
+                Some(["1", "2", "3", "4"][((pct as usize * 4) / 100).min(3)])
+            }
+            Self::UnisonVoices => Some(
+                ["1", "2", "3", "4", "5", "6"][((pct as usize * 6) / 100).min(5)],
+            ),
+            Self::Osc1Wave | Self::Osc2Wave | Self::Osc3Wave | Self::Osc4Wave => {
+                Some(wave[((pct as usize * 6) / 100).min(5)])
+            }
+            _ => None,
         }
     }
 }
@@ -232,7 +272,18 @@ const ICON_VOICE: [u8; 8] = [
     0b01000010,
 ];
 
-pub const SECTIONS: [SectionDef; 6] = [
+const ICON_ARP: [u8; 8] = [
+    0b00000010,
+    0b00000110,
+    0b00001110,
+    0b00011010,
+    0b00110010,
+    0b01100010,
+    0b11000010,
+    0b00000000,
+];
+
+pub const SECTIONS: [SectionDef; 7] = [
     SectionDef {
         name: "OSC",
         icon: ICON_OSC,
@@ -326,6 +377,18 @@ pub const SECTIONS: [SectionDef; 6] = [
                 PageSlot { label: "UNIS", target: ParamTarget::UnisonVoices, default_pct: 0 },
                 PageSlot { label: "UDET", target: ParamTarget::UnisonDetune, default_pct: 25 },
                 PageSlot { label: "MVOL", target: ParamTarget::MasterVol, default_pct: 75 },
+            ],
+        ],
+    },
+    SectionDef {
+        name: "ARP",
+        icon: ICON_ARP,
+        pages: &[
+            [
+                PageSlot { label: "ON", target: ParamTarget::ArpOn, default_pct: 0 },
+                PageSlot { label: "MODE", target: ParamTarget::ArpMode, default_pct: 0 },
+                PageSlot { label: "RATE", target: ParamTarget::ArpRate, default_pct: 78 },
+                PageSlot { label: "OCT", target: ParamTarget::ArpOct, default_pct: 0 },
             ],
         ],
     },
@@ -498,7 +561,7 @@ pub struct UiState {
     #[allow(dead_code)]
     pub fx_mix_mem: [u8; 4],
     /// Live parameter values per `[section][page][col]`.
-    pub section_vals: [[[u8; 4]; 2]; 6],
+    pub section_vals: [[[u8; 4]; 2]; SECTIONS.len()],
     /// Latest physical pot positions `0..=100` for visual tick markers.
     pub pot_pos: [u8; 2],
 }
@@ -511,7 +574,7 @@ impl Default for UiState {
 
 impl UiState {
     pub fn new() -> Self {
-        let mut section_vals = [[[50u8; 4]; 2]; 6];
+        let mut section_vals = [[[50u8; 4]; 2]; SECTIONS.len()];
         for (si, sec) in SECTIONS.iter().enumerate() {
             for (pi, page) in sec.pages.iter().enumerate() {
                 for (ci, slot) in page.iter().enumerate() {
@@ -1000,9 +1063,13 @@ fn render_section(
             c.hline(x0 + 6, ty, 3, true);
         }
 
-        // Numeric 0..100 readout at y = 44
+        // Value readout at y = 44 — text label for discrete params,
+        // numeric 0..100 for continuous ones.
         let mut nbuf = [0u8; 4];
-        let nstr = format_u8(val, &mut nbuf);
+        let nstr = slot
+            .target
+            .value_label(val)
+            .unwrap_or_else(|| format_u8(val, &mut nbuf));
         let nw = Canvas::str_width(nstr, 1);
         c.draw_str(x0 + (32 - nw) / 2, 44, nstr, 1, true);
 

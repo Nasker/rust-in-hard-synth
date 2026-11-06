@@ -30,9 +30,9 @@ pub struct InputFrame {
     /// Detent steps since last frame (+ = clockwise, - = counter-clockwise).
     /// Always 1:1 — use for discrete navigation (presets, menus, cursors).
     pub encoder_delta: i32,
-    /// Speed-scaled detent steps for continuous parameters: spins faster
-    /// than ~1 detent / 60 ms multiply ×4, faster than ~1 / 120 ms ×2.
-    /// The value still lands on real steps — just bigger ones, no jumps.
+    /// Speed-scaled detent steps for continuous parameters: ×1 for slow
+    /// turns, ×2 under ~120 ms/detent, ×4 under ~80 ms, ×8 under ~45 ms
+    /// or when several detents land in one frame. Always real steps.
     pub param_delta: i32,
     /// True on the frame a short press (<500 ms) is released.
     pub encoder_click: bool,
@@ -251,10 +251,13 @@ impl InputSource for PhysicalInputs<'static> {
         // Velocity-sensitive scaling for continuous params: several detents
         // inside one ~40 ms frame, or detents arriving on back-to-back
         // frames, mean a fast spin. Multiplied steps stay on real values.
+        // Curve: 1x slow -> 2x <120 ms -> 4x <80 ms -> 8x <45 ms per detent.
         let param_delta = if encoder_delta != 0 {
             let dt = now.wrapping_sub(self.last_detent_ms);
             self.last_detent_ms = now;
-            let mult = if encoder_delta.abs() > 1 || dt <= 60 {
+            let mult = if encoder_delta.abs() > 2 || dt <= 45 {
+                8
+            } else if encoder_delta.abs() > 1 || dt <= 80 {
                 4
             } else if dt <= 120 {
                 2
