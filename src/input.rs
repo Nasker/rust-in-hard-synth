@@ -28,7 +28,12 @@ use log::info;
 #[derive(Clone, Copy, Default)]
 pub struct InputFrame {
     /// Detent steps since last frame (+ = clockwise, - = counter-clockwise).
+    /// Always 1:1 — use for discrete navigation (presets, menus, cursors).
     pub encoder_delta: i32,
+    /// Speed-scaled detent steps for continuous parameters: spins faster
+    /// than ~1 detent / 60 ms multiply ×4, faster than ~1 / 120 ms ×2.
+    /// The value still lands on real steps — just bigger ones, no jumps.
+    pub param_delta: i32,
     /// True on the frame a short press (<500 ms) is released.
     pub encoder_click: bool,
     /// True on the frame a hold crosses 500 ms (acts as BACK / mode toggle).
@@ -111,6 +116,7 @@ pub struct PhysicalInputs<'d> {
     pcnt: PcntUnitDriver<'d>,
     last_pcnt_count: i32,
     rem_pulses: i32,
+    last_detent_ms: u32,
     sw: PinDriver<'d, Input>,
     sw_down: bool,
     sw_down_ms: u32,
@@ -186,6 +192,7 @@ impl PhysicalInputs<'static> {
             pcnt,
             last_pcnt_count: 0,
             rem_pulses: 0,
+            last_detent_ms: 0,
             sw,
             sw_down: false,
             sw_down_ms: 0,
@@ -220,6 +227,8 @@ impl PhysicalInputs<'static> {
 
 impl InputSource for PhysicalInputs<'static> {
     fn poll(&mut self) -> InputFrame {
+        let now = now_ms();
+
         // 1. Poll PCNT quadrature counter
         let raw_count = self.pcnt.get_count().unwrap_or(self.last_pcnt_count);
         let diff = raw_count - self.last_pcnt_count;
@@ -239,9 +248,26 @@ impl InputSource for PhysicalInputs<'static> {
             0
         };
 
+        // Velocity-sensitive scaling for continuous params: several detents
+        // inside one ~40 ms frame, or detents arriving on back-to-back
+        // frames, mean a fast spin. Multiplied steps stay on real values.
+        let param_delta = if encoder_delta != 0 {
+            let dt = now.wrapping_sub(self.last_detent_ms);
+            self.last_detent_ms = now;
+            let mult = if encoder_delta.abs() > 1 || dt <= 60 {
+                4
+            } else if dt <= 120 {
+                2
+            } else {
+                1
+            };
+            encoder_delta * mult
+        } else {
+            0
+        };
+
         // 2. Poll encoder push switch (active-low)
         let pressed = self.sw.is_low();
-        let now = now_ms();
         let mut encoder_click = false;
         let mut encoder_long_press = false;
 
@@ -273,6 +299,7 @@ impl InputSource for PhysicalInputs<'static> {
 
         InputFrame {
             encoder_delta,
+            param_delta,
             encoder_click,
             encoder_long_press,
             pot_pct: [self.pot_filters[0].pct, self.pot_filters[1].pct],

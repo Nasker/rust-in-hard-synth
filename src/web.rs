@@ -187,6 +187,9 @@ pub struct PresetSummary {
     pub is_mono: bool,
     /// Category-based 4 macro bar levels in 0..=100%.
     pub macro_pct: [u8; 4],
+    /// FX stage enable state [distortion, chorus, delay, reverb] — feeds the
+    /// OLED bottom-row FX kill-switch readout.
+    pub fx_on: [bool; 4],
 }
 
 pub fn preset_summary(idx: usize) -> Option<&'static PresetSummary> {
@@ -1096,6 +1099,12 @@ pub fn init_presets_json(bank: &[Preset]) {
             category: p.category.clone(),
             is_mono: p.polyphony_mode == PolyphonyMode::Mono,
             macro_pct: macro_bars_for(p),
+            fx_on: [
+                p.distortion_enabled,
+                p.chorus_enabled,
+                p.delay_enabled,
+                p.reverb_enabled,
+            ],
         });
     }
     list_json.push(']');

@@ -410,6 +410,8 @@ pub struct SystemSnapshot {
     pub macro_labels: [&'static str; 4],
     pub macro_targets: [ParamTarget; 4],
     pub macro_pct: [u8; 4],
+    /// FX stage state [distortion, chorus, delay, reverb] for the bottom row.
+    pub fx_on: [bool; 4],
 }
 
 impl SystemSnapshot {
@@ -418,7 +420,7 @@ impl SystemSnapshot {
         let riff_done = web::riff_done();
         let raw_idx = web::current_preset_index();
 
-        let (preset_idx, preset_name, preset_category, is_mono, macro_pct) =
+        let (preset_idx, preset_name, preset_category, is_mono, macro_pct, fx_on) =
             if let Some(summary) = web::preset_summary(raw_idx) {
                 (
                     Some(raw_idx),
@@ -426,11 +428,13 @@ impl SystemSnapshot {
                     summary.category.as_str(),
                     summary.is_mono,
                     summary.macro_pct,
+                    summary.fx_on,
                 )
             } else if !riff_done {
-                (None, "BOOTSTRESS", "STRESS", false, [68, 50, 70, 35])
+                // BootStress riff runs the whole FX chain.
+                (None, "BOOTSTRESS", "STRESS", false, [68, 50, 70, 35], [true; 4])
             } else {
-                (None, "INIT+", "INIT", false, [68, 50, 22, 25])
+                (None, "INIT+", "INIT", false, [68, 50, 22, 25], [false; 4])
             };
 
         Self {
@@ -450,6 +454,7 @@ impl SystemSnapshot {
             macro_labels: category_macro_labels(preset_category),
             macro_targets: category_macro_targets(preset_category),
             macro_pct,
+            fx_on,
         }
     }
 }
@@ -483,6 +488,15 @@ pub struct UiState {
     pub home_macros: [u8; 4],
     pub last_preset_idx: Option<usize>,
     pub mono_override: Option<bool>,
+    /// FX kill-switch state [dist, chorus, delay, reverb] once toggled from
+    /// the preset's declared state; `None` until a button/encoder acts.
+    pub fx_override: Option<[bool; 4]>,
+    /// Last non-zero mix (0..=100) per FX stage, restored when un-killing
+    /// chorus/delay/reverb (their enable = mix > 0). Distortion has a real
+    /// enable flag and does not need a slot here.
+    /// TODO(physical-buttons): read when GPIO 41/42/45/46 kill switches land.
+    #[allow(dead_code)]
+    pub fx_mix_mem: [u8; 4],
     /// Live parameter values per `[section][page][col]`.
     pub section_vals: [[[u8; 4]; 2]; 6],
     /// Latest physical pot positions `0..=100` for visual tick markers.
@@ -511,8 +525,39 @@ impl UiState {
             home_macros: [68, 50, 70, 35],
             last_preset_idx: None,
             mono_override: None,
+            fx_override: None,
+            fx_mix_mem: [50; 4],
             section_vals,
             pot_pos: [0, 0],
+        }
+    }
+
+    /// Effective FX on/off state: preset-declared until toggled locally.
+    pub fn fx_on(&self, snap: &SystemSnapshot) -> [bool; 4] {
+        self.fx_override.unwrap_or(snap.fx_on)
+    }
+
+    /// Toggle one FX stage (0=DIST, 1=CHRS, 2=DLY, 3=REV) — the bottom-row
+    /// button mapping. Chorus/Delay/Reverb have no enable flag: killing them
+    /// stores their mix and pushes 0.0; un-killing restores the stored mix.
+    /// Distortion uses `DistEnable` directly.
+    /// TODO(physical-buttons): call when GPIO 41/42/45/46 buttons are wired.
+    #[allow(dead_code)]
+    pub fn toggle_fx(
+        &mut self,
+        idx: usize,
+        snap: &SystemSnapshot,
+        emit: &mut impl FnMut(WebCmd),
+    ) {
+        let mut on = self.fx_on(snap);
+        on[idx] = !on[idx];
+        self.fx_override = Some(on);
+        let mix = self.fx_mix_mem[idx] as f32 / 100.0;
+        match idx {
+            0 => emit(WebCmd::DistEnable(on[0])),
+            1 => emit(WebCmd::ChorusMix(if on[1] { mix } else { 0.0 })),
+            2 => emit(WebCmd::DelayMix(if on[2] { mix } else { 0.0 })),
+            _ => emit(WebCmd::RevMix(if on[3] { mix } else { 0.0 })),
         }
     }
 
@@ -530,6 +575,7 @@ impl UiState {
             self.last_preset_idx = snap.preset_idx;
             self.home_macros = snap.macro_pct;
             self.mono_override = None;
+            self.fx_override = None;
         }
 
         match self.mode {
@@ -621,9 +667,10 @@ impl UiState {
 
                 if inp.encoder_delta != 0 {
                     if editing {
-                        // Adjust focused column value (4% per detent step)
+                        // Adjust focused column value (4% per detent step,
+                        // speed-scaled via param_delta: ×2/×4 on fast spins)
                         let cur_val = self.section_vals[sec][page][cursor] as i32;
-                        let new_val = (cur_val + inp.encoder_delta * 4).clamp(0, 100) as u8;
+                        let new_val = (cur_val + inp.param_delta * 4).clamp(0, 100) as u8;
                         self.section_vals[sec][page][cursor] = new_val;
                         let target = SECTIONS[sec].pages[page][cursor].target;
                         emit(target.to_cmd(new_val));
@@ -702,16 +749,19 @@ const GLYPH_VOICE: [u8; 8] = [
 
 pub fn render(state: &UiState, snap: &SystemSnapshot, canvas: &mut Canvas) {
     canvas.clear();
+    // Bottom row is the same on every screen: the 4 physical buttons map to
+    // DIST / CHRS / DLY / REV kill switches (filled = FX active).
+    let fx = state.fx_on(snap);
     match state.mode {
         ScreenMode::Splash => render_splash(state.frame, snap, canvas),
         ScreenMode::Home => render_home(state, snap, canvas),
-        ScreenMode::Menu { selected } => render_menu(selected, snap, canvas),
+        ScreenMode::Menu { selected } => render_menu(selected, canvas, fx),
         ScreenMode::Section {
             sec,
             page,
             cursor,
             editing,
-        } => render_section(state, sec, page, cursor, editing, canvas),
+        } => render_section(state, sec, page, cursor, editing, canvas, fx),
     }
 }
 
@@ -845,18 +895,13 @@ fn render_home(state: &UiState, snap: &SystemSnapshot, c: &mut Canvas) {
         c.draw_str(4 - offset, 37, name, 2, true);
     }
 
-    // 4. Bottom 4 Softkey Buttons
-    let softkeys = [
-        "PREV",
-        "NEXT",
-        if is_mono { "MONO" } else { "POLY" },
-        "MENU",
-    ];
-    draw_softkeys(c, &softkeys, Some(3));
+    // 4. Bottom row: FX kill-switch readout for the 4 buttons
+    //    (DIST / CHRS / DLY / REV — filled = stage active)
+    draw_fx_row(c, state.fx_on(snap));
 }
 
 /// MENU view: 3-up horizontal card carousel of synth modules with icons + names.
-fn render_menu(selected: usize, snap: &SystemSnapshot, c: &mut Canvas) {
+fn render_menu(selected: usize, c: &mut Canvas, fx: [bool; 4]) {
     // Top title bar
     c.fill_rect(0, 0, WIDTH as i32, 11, true);
     c.draw_str(3, 2, "SYNTH MODULES", 1, false);
@@ -896,8 +941,7 @@ fn render_menu(selected: usize, snap: &SystemSnapshot, c: &mut Canvas) {
         }
     }
 
-    let _ = snap;
-    draw_softkeys(c, &["HOME", "<MOD", "MOD>", "OPEN"], Some(3));
+    draw_fx_row(c, fx);
 }
 
 /// SECTION view: 4 parameter columns aligned under the 4 top pots!
@@ -908,6 +952,7 @@ fn render_section(
     cursor: usize,
     editing: bool,
     c: &mut Canvas,
+    fx: [bool; 4],
 ) {
     let sec = &SECTIONS[sec_idx];
     let page = &sec.pages[page_idx];
@@ -966,30 +1011,24 @@ fn render_section(
         }
     }
 
-    draw_softkeys(
-        c,
-        &[
-            "BACK",
-            "<COL",
-            "COL>",
-            if editing { "DONE" } else { "ADJ" },
-        ],
-        Some(3),
-    );
+    draw_fx_row(c, fx);
 }
 
-fn draw_softkeys(c: &mut Canvas, labels: &[&str; 4], highlight: Option<usize>) {
-    for (i, &lbl) in labels.iter().enumerate() {
+/// Bottom row on every screen: the 4 physical buttons are FX kill switches
+/// (DIST / CHRS / DLY / REV). Filled box = stage active, hollow = killed.
+fn draw_fx_row(c: &mut Canvas, fx_on: [bool; 4]) {
+    const LABELS: [&str; 4] = ["DIST", "CHRS", "DLY", "REV"];
+    for (i, &lbl) in LABELS.iter().enumerate() {
         let x0 = (i as i32) * 32;
-        let inv = highlight == Some(i);
-        if inv {
+        let on = fx_on[i];
+        if on {
             c.fill_rect(x0 + 1, 54, 30, 10, true);
         } else {
             c.rect(x0 + 1, 54, 30, 10, true);
         }
         let lw = Canvas::str_width(lbl, 1);
         let lx = x0 + (32 - lw) / 2;
-        c.draw_str(lx, 56, lbl, 1, !inv);
+        c.draw_str(lx, 56, lbl, 1, !on);
     }
 }
 
