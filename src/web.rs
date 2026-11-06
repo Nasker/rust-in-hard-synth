@@ -95,6 +95,8 @@ pub enum WebCmd {
     ArpRate(f32),
     /// Octave span of the arp sequence (1..=4).
     ArpOct(u8),
+    /// Arp latch: held notes keep arpeggiating after keys release.
+    ArpHold(bool),
 }
 
 /// Shared note-division table (label, quarter-note beats) used by both the Web
@@ -177,6 +179,8 @@ static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(5);
 /// for lock-free readout by the Core 0 OLED UI task.
 static ACTIVE_VOICES: AtomicUsize = AtomicUsize::new(0);
 static RIFF_DONE: AtomicBool = AtomicBool::new(false);
+/// Live arpeggiator engaged state (written by the audio task, read by UI).
+static ARP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Runtime rate toggle — the render loop reads this every block to choose
 /// between 256 direct frames (44.1 kHz) and 128 frames + Catmull-Rom 2x
 /// upsample (22.05 kHz).
@@ -218,6 +222,14 @@ pub fn set_active_voices(n: usize) {
 
 pub fn riff_done() -> bool {
     RIFF_DONE.load(Ordering::Relaxed)
+}
+
+pub fn arp_enabled() -> bool {
+    ARP_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_arp_enabled(on: bool) {
+    ARP_ENABLED.store(on, Ordering::Relaxed);
 }
 
 pub fn set_riff_done(done: bool) {
@@ -393,7 +405,11 @@ pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
         WebCmd::UniSpread(s) => vm.set_unison_spread(s),
         // Arp commands are consumed by the audio-task scheduler before
         // they ever reach apply_cmd — kept here for exhaustiveness.
-        WebCmd::ArpOn(_) | WebCmd::ArpMode(_) | WebCmd::ArpRate(_) | WebCmd::ArpOct(_) => {}
+        WebCmd::ArpOn(_)
+        | WebCmd::ArpMode(_)
+        | WebCmd::ArpRate(_)
+        | WebCmd::ArpOct(_)
+        | WebCmd::ArpHold(_) => {}
     }
 }
 
@@ -629,6 +645,7 @@ fn handle_query_one(q: &str) {
         "ar_m" => push_cmd(WebCmd::ArpMode(v as u8)),
         "ar_r" => push_cmd(WebCmd::ArpRate(v)),
         "ar_o" => push_cmd(WebCmd::ArpOct(v as u8)),
+        "ar_h" => push_cmd(WebCmd::ArpHold(v != 0.0)),
         "rv_r" => push_cmd(WebCmd::RevRoom(v)),
         "rv_d" => push_cmd(WebCmd::RevDamp(v)),
         "rv_m" => push_cmd(WebCmd::RevMix(v)),

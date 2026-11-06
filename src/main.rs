@@ -440,9 +440,14 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 }
                 web::WebCmd::ArpRate(b) => arp.set_rate_beats(b),
                 web::WebCmd::ArpOct(o) => arp.set_octaves(o),
+                web::WebCmd::ArpHold(h) => arp.set_hold(h),
                 other => web::apply_cmd(&mut vm, other),
             }
         }
+
+        // Publish live arp state for the OLED badge (also flips when a
+        // preset that ships arp_on applies it via program change below).
+        web::set_arp_enabled(arp.enabled());
 
         if let Some(prog) = usb_midi::take_program_change() {
             preset_picked = true;

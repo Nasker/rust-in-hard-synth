@@ -78,6 +78,7 @@ pub enum ParamTarget {
     UnisonDetune,
     UnisonSpread,
     ArpOn,
+    ArpHold,
     ArpMode,
     ArpRate,
     ArpOct,
@@ -111,9 +112,9 @@ impl ParamTarget {
             Self::Env3Decay => WebCmd::Env3Decay(env_t(norm)),
             Self::Env3Sustain => WebCmd::Env3Sustain(norm),
             Self::Env3Release => WebCmd::Env3Release(env_t(norm)),
-            Self::Osc1Wave => WebCmd::Param(SynthParam::Osc1Waveform, ((pct as u16 * 4) / 100) as f32),
+            Self::Osc1Wave => WebCmd::Param(SynthParam::Osc1Waveform, self.index(pct) as f32),
             Self::Osc1Level => WebCmd::Param(SynthParam::Osc1Level, norm),
-            Self::Osc2Wave => WebCmd::Param(SynthParam::Osc2Waveform, ((pct as u16 * 4) / 100) as f32),
+            Self::Osc2Wave => WebCmd::Param(SynthParam::Osc2Waveform, self.index(pct) as f32),
             Self::Osc2Level => WebCmd::Param(SynthParam::Osc2Level, norm),
             Self::Osc2Semi => {
                 let semi = ((norm * 48.0).round() - 24.0).clamp(-24.0, 24.0);
@@ -123,9 +124,9 @@ impl ParamTarget {
                 let cents = ((norm * 100.0).round() - 50.0).clamp(-50.0, 50.0);
                 WebCmd::Param(SynthParam::Osc2Cents, cents)
             }
-            Self::Osc3Wave => WebCmd::Param(SynthParam::Osc3Waveform, ((pct as u16 * 4) / 100) as f32),
+            Self::Osc3Wave => WebCmd::Param(SynthParam::Osc3Waveform, self.index(pct) as f32),
             Self::Osc3Level => WebCmd::Param(SynthParam::Osc3Level, norm),
-            Self::Osc4Wave => WebCmd::Param(SynthParam::Osc4Waveform, ((pct as u16 * 4) / 100) as f32),
+            Self::Osc4Wave => WebCmd::Param(SynthParam::Osc4Waveform, self.index(pct) as f32),
             Self::Osc4Level => WebCmd::Param(SynthParam::Osc4Level, norm),
             Self::Lfo1Rate => WebCmd::Param(SynthParam::LfoRate, 0.1 + norm * norm * 19.9),
             Self::Lfo1Depth => WebCmd::Param(SynthParam::LfoDepth, norm),
@@ -148,44 +149,66 @@ impl ParamTarget {
             Self::RevRoom => WebCmd::RevRoom(norm),
             Self::RevDamp => WebCmd::RevDamp(norm),
             Self::RevMix => WebCmd::RevMix(norm),
-            Self::PolyMode => WebCmd::PolyMode(pct >= 50),
-            Self::UnisonVoices => WebCmd::Unison((1 + (pct as u16 * 5) / 100) as u8),
+            Self::PolyMode => WebCmd::PolyMode(self.index(pct) == 1),
+            Self::UnisonVoices => WebCmd::Unison(1 + self.index(pct) as u8),
             Self::UnisonDetune => WebCmd::UniDetune(norm * 50.0),
             Self::UnisonSpread => WebCmd::UniSpread(norm),
-            Self::ArpOn => WebCmd::ArpOn(pct >= 50),
-            Self::ArpMode => WebCmd::ArpMode(((pct as u16 * 4) / 100).min(3) as u8),
+            Self::ArpOn => WebCmd::ArpOn(self.index(pct) == 1),
+            Self::ArpHold => WebCmd::ArpHold(self.index(pct) == 1),
+            Self::ArpMode => WebCmd::ArpMode(self.index(pct) as u8),
             Self::ArpRate => {
                 // Stepped beat divisions, slow -> fast: 1/2 .. 1/32.
                 const DIVS: [f32; 7] = [2.0, 1.0, 0.75, 0.5, 0.375, 0.25, 0.125];
-                let idx = ((pct as usize) * DIVS.len() / 101).min(DIVS.len() - 1);
-                WebCmd::ArpRate(DIVS[idx])
+                WebCmd::ArpRate(DIVS[self.index(pct)])
             }
-            Self::ArpOct => WebCmd::ArpOct((1 + (pct as u16 * 4) / 100).min(4) as u8),
+            Self::ArpOct => WebCmd::ArpOct(1 + self.index(pct) as u8),
         }
+    }
+
+    /// Number of discrete positions for stepped params (binary toggles,
+    /// mode selects, octave counts). `None` = continuous 0..100 control —
+    /// stepped params edit one position per detent, not a % of a bar.
+    pub fn steps(self) -> Option<u8> {
+        match self {
+            Self::ArpOn | Self::ArpHold | Self::PolyMode => Some(2),
+            Self::ArpMode | Self::ArpOct => Some(4),
+            Self::ArpRate => Some(7),
+            Self::UnisonVoices => Some(6),
+            Self::Osc1Wave | Self::Osc2Wave | Self::Osc3Wave | Self::Osc4Wave => Some(5),
+            _ => None,
+        }
+    }
+
+    /// Discrete index `0..steps-1` a normalized pct falls into.
+    pub fn index(self, pct: u8) -> usize {
+        let s = self.steps().unwrap_or(1) as usize;
+        ((pct as usize * s) / 100).min(s - 1)
+    }
+
+    /// Mid-bucket pct for index `i` — maps back to the same index under
+    /// [`index`](Self::index) (floor buckets don't round-trip for odd
+    /// step counts, so we aim at the bucket's center).
+    pub fn index_pct(self, idx: usize) -> u8 {
+        let s = self.steps().unwrap_or(1) as usize;
+        ((idx * 2 + 1) * 50 / s) as u8
     }
 
     /// Human-readable label for discrete/stepped parameters (shown instead
     /// of the raw 0-100 number on the SECTION page). `None` = numeric.
+    /// Index math matches [`index`](Self::index) / [`steps`](Self::steps).
     pub fn value_label(self, pct: u8) -> Option<&'static str> {
-        let wave = ["SIN", "SQR", "SAW", "TRI", "NSE", "PLS"];
+        let i = self.index(pct);
         match self {
-            Self::ArpOn => Some(if pct >= 50 { "ON" } else { "OFF" }),
-            Self::PolyMode => Some(if pct >= 50 { "POLY" } else { "MONO" }),
-            Self::ArpMode => Some(
-                ["UP", "DOWN", "U/DN", "RND"][((pct as usize * 4) / 100).min(3)],
-            ),
-            Self::ArpRate => Some(
-                ["1/2", "1/4", "1/8D", "1/8", "16D", "1/16", "1/32"]
-                    [(pct as usize * 7 / 101).min(6)],
-            ),
-            Self::ArpOct => {
-                Some(["1", "2", "3", "4"][((pct as usize * 4) / 100).min(3)])
+            Self::ArpOn | Self::ArpHold => Some(if i == 1 { "ON" } else { "OFF" }),
+            Self::PolyMode => Some(if i == 1 { "POLY" } else { "MONO" }),
+            Self::ArpMode => Some(["UP", "DOWN", "U/DN", "RND"][i]),
+            Self::ArpRate => {
+                Some(["1/2", "1/4", "1/8D", "1/8", "16D", "1/16", "1/32"][i])
             }
-            Self::UnisonVoices => Some(
-                ["1", "2", "3", "4", "5", "6"][((pct as usize * 6) / 100).min(5)],
-            ),
+            Self::ArpOct => Some(["1", "2", "3", "4"][i]),
+            Self::UnisonVoices => Some(["1", "2", "3", "4", "5", "6"][i]),
             Self::Osc1Wave | Self::Osc2Wave | Self::Osc3Wave | Self::Osc4Wave => {
-                Some(wave[((pct as usize * 6) / 100).min(5)])
+                Some(["SIN", "SQR", "SAW", "TRI", "NSE"][i])
             }
             _ => None,
         }
@@ -203,7 +226,9 @@ pub struct PageSlot {
 pub struct SectionDef {
     pub name: &'static str,
     pub icon: [u8; 8],
-    pub pages: &'static [[PageSlot; 4]],
+    /// Parameter pages; each page holds up to 4 column slots aligned
+    /// under the top pots (shorter pages leave their columns empty).
+    pub pages: &'static [&'static [PageSlot]],
 }
 
 const ICON_OSC: [u8; 8] = [
@@ -288,13 +313,13 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "OSC",
         icon: ICON_OSC,
         pages: &[
-            [
+            &[
                 PageSlot { label: "O1WF", target: ParamTarget::Osc1Wave, default_pct: 25 },
                 PageSlot { label: "O1LV", target: ParamTarget::Osc1Level, default_pct: 85 },
                 PageSlot { label: "O2WF", target: ParamTarget::Osc2Wave, default_pct: 25 },
                 PageSlot { label: "O2LV", target: ParamTarget::Osc2Level, default_pct: 65 },
             ],
-            [
+            &[
                 PageSlot { label: "O2SM", target: ParamTarget::Osc2Semi, default_pct: 50 },
                 PageSlot { label: "O2DT", target: ParamTarget::Osc2Detune, default_pct: 55 },
                 PageSlot { label: "O3LV", target: ParamTarget::Osc3Level, default_pct: 45 },
@@ -306,13 +331,13 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "FILT",
         icon: ICON_FILT,
         pages: &[
-            [
+            &[
                 PageSlot { label: "CUT", target: ParamTarget::Cutoff, default_pct: 68 },
                 PageSlot { label: "RES", target: ParamTarget::Resonance, default_pct: 45 },
                 PageSlot { label: "FENV", target: ParamTarget::FilterEnvAmt, default_pct: 70 },
                 PageSlot { label: "FDEC", target: ParamTarget::FilterDecay, default_pct: 40 },
             ],
-            [
+            &[
                 PageSlot { label: "FATK", target: ParamTarget::FilterAttack, default_pct: 10 },
                 PageSlot { label: "FDEC", target: ParamTarget::FilterDecay, default_pct: 40 },
                 PageSlot { label: "FSUS", target: ParamTarget::FilterSustain, default_pct: 30 },
@@ -324,13 +349,13 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "ENV",
         icon: ICON_ENV,
         pages: &[
-            [
+            &[
                 PageSlot { label: "AATK", target: ParamTarget::AmpAttack, default_pct: 8 },
                 PageSlot { label: "ADEC", target: ParamTarget::AmpDecay, default_pct: 35 },
                 PageSlot { label: "ASUS", target: ParamTarget::AmpSustain, default_pct: 80 },
                 PageSlot { label: "AREL", target: ParamTarget::AmpRelease, default_pct: 35 },
             ],
-            [
+            &[
                 PageSlot { label: "E3AT", target: ParamTarget::Env3Attack, default_pct: 10 },
                 PageSlot { label: "E3DC", target: ParamTarget::Env3Decay, default_pct: 40 },
                 PageSlot { label: "E3SU", target: ParamTarget::Env3Sustain, default_pct: 50 },
@@ -342,7 +367,7 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "LFO",
         icon: ICON_LFO,
         pages: &[
-            [
+            &[
                 PageSlot { label: "L1RT", target: ParamTarget::Lfo1Rate, default_pct: 25 },
                 PageSlot { label: "L1DP", target: ParamTarget::Lfo1Depth, default_pct: 20 },
                 PageSlot { label: "L2RT", target: ParamTarget::Lfo2Rate, default_pct: 50 },
@@ -354,13 +379,13 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "FX",
         icon: ICON_FX,
         pages: &[
-            [
+            &[
                 PageSlot { label: "DRV", target: ParamTarget::DistDrive, default_pct: 0 },
                 PageSlot { label: "DMIX", target: ParamTarget::DistMix, default_pct: 50 },
                 PageSlot { label: "CHMX", target: ParamTarget::ChorusMix, default_pct: 25 },
                 PageSlot { label: "CHDP", target: ParamTarget::ChorusDepth, default_pct: 35 },
             ],
-            [
+            &[
                 PageSlot { label: "DLTM", target: ParamTarget::DelayTime, default_pct: 30 },
                 PageSlot { label: "DLFB", target: ParamTarget::DelayFb, default_pct: 38 },
                 PageSlot { label: "DLMX", target: ParamTarget::DelayMix, default_pct: 22 },
@@ -372,7 +397,7 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "VOICE",
         icon: ICON_VOICE,
         pages: &[
-            [
+            &[
                 PageSlot { label: "GLID", target: ParamTarget::Glide, default_pct: 15 },
                 PageSlot { label: "UNIS", target: ParamTarget::UnisonVoices, default_pct: 0 },
                 PageSlot { label: "UDET", target: ParamTarget::UnisonDetune, default_pct: 25 },
@@ -384,10 +409,13 @@ pub const SECTIONS: [SectionDef; 7] = [
         name: "ARP",
         icon: ICON_ARP,
         pages: &[
-            [
+            &[
                 PageSlot { label: "ON", target: ParamTarget::ArpOn, default_pct: 0 },
+                PageSlot { label: "HOLD", target: ParamTarget::ArpHold, default_pct: 0 },
                 PageSlot { label: "MODE", target: ParamTarget::ArpMode, default_pct: 0 },
                 PageSlot { label: "RATE", target: ParamTarget::ArpRate, default_pct: 78 },
+            ],
+            &[
                 PageSlot { label: "OCT", target: ParamTarget::ArpOct, default_pct: 0 },
             ],
         ],
@@ -470,6 +498,8 @@ pub struct SystemSnapshot {
     pub preset_name: &'static str,
     pub preset_category: &'static str,
     pub is_mono: bool,
+    /// Arpeggiator engaged — live state from the audio task.
+    pub arp_on: bool,
     pub macro_labels: [&'static str; 4],
     pub macro_targets: [ParamTarget; 4],
     pub macro_pct: [u8; 4],
@@ -514,6 +544,7 @@ impl SystemSnapshot {
             preset_name,
             preset_category,
             is_mono,
+            arp_on: web::arp_enabled(),
             macro_labels: category_macro_labels(preset_category),
             macro_targets: category_macro_targets(preset_category),
             macro_pct,
@@ -706,14 +737,16 @@ impl UiState {
                 mut cursor,
                 mut editing,
             } => {
-                let num_pages = SECTIONS[sec].pages.len();
+                let section = &SECTIONS[sec];
 
                 // Pots 0 and 1 always control Columns 0 and 1 of the active page!
                 for pot_idx in 0..2 {
                     if let Some(pct) = inp.pot_moved[pot_idx] {
-                        self.section_vals[sec][page][pot_idx] = pct;
-                        let target = SECTIONS[sec].pages[page][pot_idx].target;
-                        emit(target.to_cmd(pct));
+                        if pot_idx < section.pages[page].len() {
+                            self.section_vals[sec][page][pot_idx] = pct;
+                            let target = section.pages[page][pot_idx].target;
+                            emit(target.to_cmd(pct));
+                        }
                     }
                 }
 
@@ -730,20 +763,41 @@ impl UiState {
 
                 if inp.encoder_delta != 0 {
                     if editing {
-                        // Adjust focused column value (4% per detent step,
-                        // speed-scaled via param_delta: ×2/×4 on fast spins)
+                        let target = section.pages[page][cursor].target;
                         let cur_val = self.section_vals[sec][page][cursor] as i32;
-                        let new_val = (cur_val + inp.param_delta * 4).clamp(0, 100) as u8;
+                        let new_val = if let Some(steps) = target.steps() {
+                            // Stepped params: one detent = one position
+                            // (ON/OFF flips with a single click — no bar ride).
+                            let cur_idx = target.index(cur_val as u8) as i32;
+                            let new_idx = (cur_idx + inp.encoder_delta)
+                                .clamp(0, steps as i32 - 1);
+                            target.index_pct(new_idx as usize) as i32
+                        } else {
+                            // Continuous: 4% per detent, speed-scaled
+                            // via param_delta (x2/x4/x8 on fast spins).
+                            cur_val + inp.param_delta * 4
+                        };
+                        let new_val = new_val.clamp(0, 100) as u8;
                         self.section_vals[sec][page][cursor] = new_val;
-                        let target = SECTIONS[sec].pages[page][cursor].target;
                         emit(target.to_cmd(new_val));
                     } else {
-                        // Move column cursor across all columns (and wrap across pages in this section)
-                        let total_slots = (num_pages * 4) as i32;
-                        let flat = (page * 4 + cursor) as i32;
-                        let next_flat = (flat + inp.encoder_delta).rem_euclid(total_slots) as usize;
-                        page = next_flat / 4;
-                        cursor = next_flat % 4;
+                        // Move column cursor across all columns, wrapping
+                        // across pages — pages may hold <4 slots (ARP pg 2).
+                        let total: usize = section.pages.iter().map(|p| p.len()).sum();
+                        let flat = section.pages[..page]
+                            .iter()
+                            .map(|p| p.len())
+                            .sum::<usize>()
+                            + cursor;
+                        let next = (flat as i32 + inp.encoder_delta)
+                            .rem_euclid(total as i32) as usize;
+                        let mut rem = next;
+                        page = 0;
+                        while rem >= section.pages[page].len() {
+                            rem -= section.pages[page].len();
+                            page += 1;
+                        }
+                        cursor = rem;
                     }
                 }
 
@@ -941,7 +995,13 @@ fn render_home(state: &UiState, snap: &SystemSnapshot, c: &mut Canvas) {
     // 3. Center Preset Hero Area (y = 26..51)
     let is_mono = state.mono_override.unwrap_or(snap.is_mono);
     let mut hdr_buf = [0u8; 22];
-    let hdr = format_preset_header(snap.preset_idx, snap.preset_category, is_mono, &mut hdr_buf);
+    let hdr = format_preset_header(
+        snap.preset_idx,
+        snap.preset_category,
+        is_mono,
+        snap.arp_on,
+        &mut hdr_buf,
+    );
     c.draw_str_centered(27, hdr, 1, true);
 
     let name = snap.preset_name;
@@ -1018,7 +1078,7 @@ fn render_section(
     fx: [bool; 4],
 ) {
     let sec = &SECTIONS[sec_idx];
-    let page = &sec.pages[page_idx];
+    let page = sec.pages[page_idx];
 
     // Header bar (y = 0..10) showing section name + page number + edit mode hint
     c.fill_rect(0, 0, WIDTH as i32, 11, true);
@@ -1035,10 +1095,10 @@ fn render_section(
     }
     c.draw_str(92, 2, if editing { "[EDIT]" } else { "[NAV]" }, 1, false);
 
-    // 4 Parameter Columns (x = 0, 32, 64, 96), y = 13..51
-    for col in 0..4 {
+    // Parameter Columns (x = 0, 32, 64, 96), y = 13..51 — up to 4 slots
+    // per page, aligned under the top pots (ARP pg 2 carries only OCT).
+    for (col, slot) in page.iter().enumerate() {
         let x0 = (col as i32) * 32;
-        let slot = &page[col];
         let val = state.section_vals[sec_idx][page_idx][col];
         let focused = col == cursor;
 
@@ -1139,6 +1199,7 @@ fn format_preset_header<'a>(
     idx: Option<usize>,
     cat: &str,
     is_mono: bool,
+    arp_on: bool,
     buf: &'a mut [u8; 22],
 ) -> &'a str {
     let mut n = 0usize;
@@ -1161,6 +1222,9 @@ fn format_preset_header<'a>(
     push(&cat.as_bytes()[..cat.len().min(6)]);
     push(b"] ");
     push(if is_mono { b"MONO" } else { b"POLY" });
+    if arp_on {
+        push(b" +ARP");
+    }
     core::str::from_utf8(&buf[..n]).unwrap_or("SYNTH")
 }
 
