@@ -100,6 +100,11 @@ impl PotFilter {
 
 const LONG_PRESS_MS: u32 = 480;
 
+/// Flip to `true` when reliable potentiometers are wired back in — the ADC
+/// channels and filters are still constructed below, so this is the only
+/// switch needed to re-enable Pot 0 (GPIO 2) and Pot 1 (GPIO 1).
+pub const POTS_ENABLED: bool = false;
+
 /// Self-owning wrapper: holds `AdcDriver` in a `Box::leak` static reference so
 /// multiple `AdcChannelDriver`s can borrow it without lifetime self-reference.
 pub struct PhysicalInputs<'d> {
@@ -193,8 +198,8 @@ impl PhysicalInputs<'static> {
         // Prime initial pot positions so boot doesn't fire synthetic pot moves.
         let _ = this.sample_pots();
         info!(
-            "input: ready — Pot0(left/GPIO2)={}% Pot1(GPIO1)={}% Encoder(GPIO38/39/40)",
-            this.pot_filters[0].pct, this.pot_filters[1].pct
+            "input: ready — Encoder(GPIO38/39/40) Pots(GPIO2/GPIO1) {}",
+            if POTS_ENABLED { "enabled" } else { "DISABLED" }
         );
         Ok(this)
     }
@@ -223,11 +228,13 @@ impl InputSource for PhysicalInputs<'static> {
         // Standard encoders produce 2 edges per detent on a single edge-channel
         // (rising + falling of CLK). Accumulate so both 1-edge and 2-edge
         // encoders feel responsive without losing half-steps.
+        // The PCNT decode counts clockwise as negative on this encoder
+        // (CLK leads DT); negate so +delta = clockwise = "next" in the UI.
         self.rem_pulses += diff;
         let encoder_delta = if self.rem_pulses.abs() >= 2 {
             let steps = self.rem_pulses / 2;
             self.rem_pulses -= steps * 2;
-            steps
+            -steps
         } else {
             0
         };
@@ -256,8 +263,13 @@ impl InputSource for PhysicalInputs<'static> {
             }
         }
 
-        // 3. Poll ADC1 pots
-        let pot_moved = self.sample_pots();
+        // 3. Poll ADC1 pots (disabled until reliable pots are wired — see
+        // POTS_ENABLED). Reporting None keeps every pot-driven param frozen.
+        let pot_moved = if POTS_ENABLED {
+            self.sample_pots()
+        } else {
+            [None, None]
+        };
 
         InputFrame {
             encoder_delta,

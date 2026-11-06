@@ -10,7 +10,7 @@
 //!   and PCNT encoder (`GPIO 38..40`) into the Core 0 UI task (~25 FPS).
 
 use crate::display::{Canvas, Display, Sh1106Spi, HEIGHT, WIDTH};
-use crate::input::{InputFrame, InputSource, PhysicalInputs};
+use crate::input::{InputFrame, InputSource, PhysicalInputs, POTS_ENABLED};
 use crate::status::{self, Status};
 use crate::usb_midi;
 use crate::web::{self, WebCmd};
@@ -773,7 +773,7 @@ fn render_home(state: &UiState, snap: &SystemSnapshot, c: &mut Canvas) {
             c.fill_rect(x0 + 4, 9, fill.clamp(1, 24), 2, true);
         }
         // For wired Pots 0 & 1, draw a small physical-position tick under the bar
-        if col < 2 {
+        if col < 2 && POTS_ENABLED {
             let tick_x = x0 + 4 + ((state.pot_pos[col] as i32) * 23) / 100;
             c.set_pixel(tick_x, 12, true);
         }
@@ -950,7 +950,7 @@ fn render_section(
         }
 
         // Physical pot position tick on the left side of the bar for Pots 0 & 1
-        if col < 2 {
+        if col < 2 && POTS_ENABLED {
             let ty = 24 + 16 - ((state.pot_pos[col] as i32) * 15) / 100;
             c.hline(x0 + 6, ty, 3, true);
         }
