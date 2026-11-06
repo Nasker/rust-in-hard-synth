@@ -19,6 +19,7 @@ use log::info;
 use rinsynth_model as model;
 
 mod display;
+mod input;
 mod status;
 mod ui;
 mod usb_midi;
@@ -60,8 +61,8 @@ fn main() -> anyhow::Result<()> {
     status::init(p.pins.gpio48);
 
     // 1.3" SPI OLED (SH1106/SSD1306): CLK=GPIO9, MOSI=GPIO10, RES=GPIO11,
-    // DC=GPIO12, CS=GPIO13. Starts the animated SPLASH screen immediately
-    // on Core 0 while preset tables, audio engine, and Wi-Fi initialize.
+    // DC=GPIO12, CS=GPIO13 + Pot0(left)=GPIO2, Pot1=GPIO1 + Encoder=GPIO38/39/40.
+    // Starts the animated SPLASH screen immediately on Core 0.
     ui::init(
         p.spi2,
         p.pins.gpio9,
@@ -69,6 +70,12 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio11,
         p.pins.gpio12,
         p.pins.gpio13,
+        p.adc1,
+        p.pins.gpio2,
+        p.pins.gpio1,
+        p.pins.gpio38,
+        p.pins.gpio39,
+        p.pins.gpio40,
     );
 
     let std_cfg = StdConfig::new(
