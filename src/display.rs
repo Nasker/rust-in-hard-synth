@@ -304,8 +304,8 @@ impl<'d> Sh1106Spi<'d> {
             0x40,       // Start line = 0
             0xAD, 0x8B, // SH1106 internal DC-DC charge pump ON
             0x8D, 0x14, // SSD1306 charge pump ON (no-op on SH1106)
-            0xA1,       // Segment remap (col 127 mapped to SEG0)
-            0xC8,       // COM output scan direction remapped
+            0xA0,       // Segment remap normal (flipped 180° from 0xA1)
+            0xC0,       // COM output scan normal (flipped 180° from 0xC8)
             0xDA, 0x12, // COM pins hardware configuration (alternative)
             0x81, 0xCF, // Contrast control
             0xD9, 0xF1, // Pre-charge period
