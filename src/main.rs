@@ -18,7 +18,9 @@ use esp_idf_sys as _;
 use log::info;
 use rinsynth_model as model;
 
+mod display;
 mod status;
+mod ui;
 mod usb_midi;
 mod web;
 
@@ -56,6 +58,18 @@ fn main() -> anyhow::Result<()> {
     // Onboard WS2812 RGB (GPIO48, free per the pin budget) — blue blink
     // until the web server is up, then dim green.
     status::init(p.pins.gpio48);
+
+    // 1.3" SPI OLED (SH1106/SSD1306): CLK=GPIO9, MOSI=GPIO10, RES=GPIO11,
+    // DC=GPIO12, CS=GPIO13. Starts the animated SPLASH screen immediately
+    // on Core 0 while preset tables, audio engine, and Wi-Fi initialize.
+    ui::init(
+        p.spi2,
+        p.pins.gpio9,
+        p.pins.gpio10,
+        p.pins.gpio11,
+        p.pins.gpio12,
+        p.pins.gpio13,
+    );
 
     let std_cfg = StdConfig::new(
         Config::default(),
@@ -416,6 +430,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             if !arp_done {
                 info!("demo riff: done");
                 arp_done = true;
+                web::set_riff_done(true);
                 if !preset_picked {
                     vm.apply_preset(&play_preset);
                     info!("engine: stress riff over -> play patch '{}'", play_preset.name);
@@ -512,6 +527,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         if dt > max_render_us {
             max_render_us = dt;
         }
+        web::set_active_voices(vm.active_voice_count());
 
         // CPU governor + overrun accounting.
         let ceiling = web::user_voice_cap().min(MAX_VOICES);

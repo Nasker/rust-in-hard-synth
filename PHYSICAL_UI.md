@@ -101,7 +101,7 @@ pages" model as Nord/Peak/Hydrasynth.
   - **+2 column RAM offset** — its internal RAM is 132 wide; column 0 of
     the visible panel starts at RAM column 2. One offset in the flush
     routine, invisible to everything above it.
-  - SPI + DMA on GPIO10–13 → full-frame 1 KB writes are cheap; ~25-30 fps
+  - SPI + DMA on GPIO 9–13 → full-frame 1 KB writes are cheap; ~25-30 fps
     refresh is trivial headroom.
 
 ## HOME macros — category defaults + per-preset override (confirmed)
@@ -170,7 +170,8 @@ is untouched. Design:
 - Pots ×4: ADC1 GPIO1-4 (100 nF at wiper, EMA + ~1% hysteresis — Wi-Fi-safe)
 - Encoder: PCNT on GPIO38/39 + click on GPIO40 — zero CPU
 - Buttons ×4: GPIO41,42,45,46 (or 47 — all free per budget)
-- Display: SH1106 SPI — GPIO10(SCK) 11(MOSI) 12(DC) 13(CS) (+RESET any free)
+- Display: SH1106 1.3" SPI — GPIO 9 (CLK), GPIO 10 (MOSI), GPIO 11 (RES),
+  GPIO 12 (DC), GPIO 13 (CS)
 - Status LED: already done (GPIO48)
 
 ## Milestones (each independently flashable)

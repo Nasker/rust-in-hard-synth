@@ -159,19 +159,59 @@ static HTTPD_HANDLE: AtomicUsize = AtomicUsize::new(0);
 const MAX_HTTPD_SESSIONS: usize = 12;
 static PRESETS_LIST_JSON: OnceLock<String> = OnceLock::new();
 static PRESET_DETAILS_JSON: OnceLock<Vec<String>> = OnceLock::new();
+static PRESET_SUMMARIES: OnceLock<Vec<PresetSummary>> = OnceLock::new();
 static WIFI: Mutex<Option<EspWifi<'static>>> = Mutex::new(None);
 static SAVED_SSID: Mutex<String> = Mutex::new(String::new());
 /// UI-configured polyphony ceiling — the audio-loop governor reads this every
 /// block and clamps its adaptive cap to it.
 static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(5);
+/// Live active-voice count and demo-riff completion flag updated by Core 1
+/// for lock-free readout by the Core 0 OLED UI task.
+static ACTIVE_VOICES: AtomicUsize = AtomicUsize::new(0);
+static RIFF_DONE: AtomicBool = AtomicBool::new(false);
 /// Runtime rate toggle — the render loop reads this every block to choose
 /// between 256 direct frames (44.1 kHz) and 128 frames + Catmull-Rom 2x
 /// upsample (22.05 kHz).
 static SYNTH_HALF: AtomicBool = AtomicBool::new(false);
 /// Live BPM (f32 bits) and active preset index for lock-free readout by
-/// Web/OLED UI tasks on Core 0.
+/// Web/OLED UI tasks on Core 0 (`usize::MAX` = post-riff Init+ patch).
 static CURRENT_BPM_BITS: AtomicU32 = AtomicU32::new(0x42F0_0000); // 120.0f32
-static CURRENT_PRESET_IDX: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_PRESET_IDX: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Compact, pre-extracted metadata for the OLED UI so Core 0 never parses JSON
+/// or contends with Core 1 for preset strings/macro bars.
+#[derive(Clone)]
+pub struct PresetSummary {
+    pub name: String,
+    pub category: String,
+    pub is_mono: bool,
+    /// Category-based 4 macro bar levels in 0..=100%.
+    pub macro_pct: [u8; 4],
+}
+
+pub fn preset_summary(idx: usize) -> Option<&'static PresetSummary> {
+    PRESET_SUMMARIES.get().and_then(|v| v.get(idx))
+}
+
+pub fn preset_count() -> usize {
+    PRESET_SUMMARIES.get().map_or(0, |v| v.len())
+}
+
+pub fn active_voices() -> usize {
+    ACTIVE_VOICES.load(Ordering::Relaxed)
+}
+
+pub fn set_active_voices(n: usize) {
+    ACTIVE_VOICES.store(n, Ordering::Relaxed);
+}
+
+pub fn riff_done() -> bool {
+    RIFF_DONE.load(Ordering::Relaxed)
+}
+
+pub fn set_riff_done(done: bool) {
+    RIFF_DONE.store(done, Ordering::Relaxed);
+}
 
 pub fn user_voice_cap() -> usize {
     USER_VOICE_CAP.load(Ordering::Relaxed).clamp(1, 6)
@@ -1004,11 +1044,44 @@ unsafe extern "C" fn ws_get(req: *mut httpd_req_t) -> esp_err_t {
     ESP_OK
 }
 
+fn macro_bars_for(p: &Preset) -> [u8; 4] {
+    let pct = |x: f32| (x.clamp(0.0, 1.0) * 100.0) as u8;
+    let cut = (((p.filter_cutoff.clamp(20.0, 20_000.0) / 20.0).ln()
+        / (20_000.0f32 / 20.0).ln())
+        * 100.0)
+        .clamp(0.0, 100.0) as u8;
+    let res = pct(p.filter_resonance);
+    let fenv = pct((p.filter_env_amount + 1.0) * 0.5);
+    match p.category.as_str() {
+        "Bass" => [cut, res, fenv, pct(p.filter_decay / 2.0)],
+        "Lead" => [cut, res, pct(p.portamento_time / 0.5), fenv],
+        "Pad" => [
+            pct(p.amp_attack / 2.0),
+            cut,
+            pct(if p.reverb_enabled { p.reverb_mix } else { 0.0 }),
+            pct(if p.chorus_enabled { p.chorus_mix } else { 0.0 }),
+        ],
+        "Keys" => [
+            cut,
+            pct(p.amp_decay / 2.0),
+            pct(p.amp_release / 2.0),
+            pct(if p.reverb_enabled { p.reverb_mix } else { 0.0 }),
+        ],
+        _ => [
+            cut,
+            res,
+            pct(if p.delay_enabled { p.delay_mix } else { 0.0 }),
+            pct(if p.reverb_enabled { p.reverb_mix } else { 0.0 }),
+        ],
+    }
+}
+
 /// Pre-build preset directory & per-preset UI JSON in PSRAM.
 pub fn init_presets_json(bank: &[Preset]) {
     let mut list_json = String::with_capacity(4096);
     list_json.push('[');
     let mut details = Vec::with_capacity(bank.len());
+    let mut summaries = Vec::with_capacity(bank.len());
     for (i, p) in bank.iter().enumerate() {
         if i > 0 {
             list_json.push(',');
@@ -1018,10 +1091,17 @@ pub fn init_presets_json(bank: &[Preset]) {
             i, p.name, p.category
         ));
         details.push(preset_to_ui_json(p));
+        summaries.push(PresetSummary {
+            name: p.name.clone(),
+            category: p.category.clone(),
+            is_mono: p.polyphony_mode == PolyphonyMode::Mono,
+            macro_pct: macro_bars_for(p),
+        });
     }
     list_json.push(']');
     let _ = PRESETS_LIST_JSON.set(list_json);
     let _ = PRESET_DETAILS_JSON.set(details);
+    let _ = PRESET_SUMMARIES.set(summaries);
 }
 
 /// Start the SoftAP (+ optional STA) + Captive DNS + HTTP/WS server on Core 0.

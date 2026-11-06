@@ -86,11 +86,17 @@ static RING: SpscRing = SpscRing::new();
 // can't drop or double-commit slots. The audio-side pop stays lock-free.
 static PUSH_LOCK: Mutex<()> = Mutex::new(());
 static SEEN: AtomicBool = AtomicBool::new(false);
+static DEV_CONNECTED: AtomicBool = AtomicBool::new(false);
 static EVENTS: AtomicUsize = AtomicUsize::new(0);
 static PENDING_PROG: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Pending BPM estimated from incoming USB-MIDI Timing Clock (0xF8, 24 PPQN).
 /// `u32::MAX` means no new clock update since last audio-task poll.
 static PENDING_CLOCK_BPM: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// True while a class-compliant USB-MIDI device is attached and claimed.
+pub fn device_connected() -> bool {
+    DEV_CONNECTED.load(Ordering::Relaxed)
+}
 
 /// True once any MIDI packet has been observed — used to gate the demo
 /// arp off once a real keyboard is in play.
@@ -309,6 +315,7 @@ unsafe fn try_open_device(dev_addr: u8) {
     (*h.xfer).callback = Some(in_xfer_cb);
     (*h.xfer).num_bytes = XFER_SIZE as i32;
     usb_host_transfer_submit(h.xfer);
+    DEV_CONNECTED.store(true, Ordering::Relaxed);
 
     info!(
         "usb-midi: device ready — intf {} alt {}, IN ep 0x{:02x}",
@@ -329,6 +336,7 @@ unsafe extern "C" fn client_event_cb(
         }
         x if x == usb_host_client_event_t_USB_HOST_CLIENT_EVENT_DEV_GONE => {
             info!("usb-midi: device gone");
+            DEV_CONNECTED.store(false, Ordering::Relaxed);
             let h = &mut *(&raw mut HOST);
             if !h.dev.is_null() {
                 usb_host_interface_release(h.client, h.dev, h.intf_num);

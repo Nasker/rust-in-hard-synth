@@ -312,8 +312,9 @@ wiring away from the module antenna.
     software EMA + ~1% hysteresis deadband so Wi-Fi TX bursts don't jitter knobs.
   - **Rotary encoder**: use hardware `PCNT` peripheral (e.g., `GPIO 38, 39`,
     switch on `GPIO 40`) — zero CPU interrupt overhead.
-  - **OLED (128×64 SSD1306/SH1106)**: I2C @ 400 kHz–1 MHz (`GPIO 8, 9`) or SPI
-    DMA (`GPIO 10–13`), driven from a low-priority Core 0 task (~20–30 FPS).
+  - **OLED (128×64 1.3" SH1106 SPI, `src/display.rs` + `src/ui.rs`)**: SPI2 DMA
+    on `GPIO 9` (CLK), `GPIO 10` (MOSI), `GPIO 11` (RES), `GPIO 12` (DC),
+    `GPIO 13` (CS), driven from a low-priority Core 0 task (~25 FPS).
   - **Status LED (`src/status.rs`)**: onboard WS2812 on `GPIO 48` via RMT
     (`TxChannelDriver` + `SimpleEncoder`) behind `trait Indicator`; lock-free
     atomic producer API (`status::set(Status)` / `status::notify(Event)`).

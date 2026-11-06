@@ -62,6 +62,29 @@ fn pending(deadline: &AtomicU32, now: u32) -> bool {
         && deadline.load(Ordering::Relaxed) != 0
 }
 
+/// Snapshot of indicator state for secondary UI consumers (e.g. OLED header).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Snapshot {
+    pub status: Status,
+    pub midi_active: bool,
+    pub overload_active: bool,
+}
+
+/// Lock-free readout of current status + transient overlays.
+pub fn snapshot() -> Snapshot {
+    let now = now_ms();
+    let status = match STATUS.load(Ordering::Relaxed) {
+        s if s == Status::Ready as u8 => Status::Ready,
+        s if s == Status::Error as u8 => Status::Error,
+        _ => Status::Booting,
+    };
+    Snapshot {
+        status,
+        midi_active: pending(&MIDI_UNTIL_MS, now),
+        overload_active: pending(&OVERLOAD_UNTIL_MS, now),
+    }
+}
+
 /// Set the steady-state system status (idempotent, atomic, RT-safe).
 pub fn set(status: Status) {
     STATUS.store(status as u8, Ordering::Relaxed);
