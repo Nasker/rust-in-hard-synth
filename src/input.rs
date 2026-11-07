@@ -34,8 +34,12 @@ pub struct InputFrame {
     /// turns, ×2 under ~120 ms/detent, ×4 under ~80 ms, ×8 under ~45 ms
     /// or when several detents land in one frame. Always real steps.
     pub param_delta: i32,
-    /// True on the frame a short press (<500 ms) is released.
+    /// True on the frame a short press (<500 ms) is confirmed — dispatched
+    /// ~`DBL_CLICK_MS` after release so a double-click can be caught first.
     pub encoder_click: bool,
+    /// True on the frame two short clicks land within `DBL_CLICK_MS`
+    /// (Wi-Fi radio defeat for the RF-EMI A/B test — no click fires too).
+    pub encoder_dbl_click: bool,
     /// True on the frame a hold crosses 500 ms (acts as BACK / mode toggle).
     pub encoder_long_press: bool,
     /// Current physical pot positions in 0..=100% (`[pot0_left_gpio2, pot1_gpio1]`).
@@ -105,6 +109,11 @@ impl PotFilter {
 
 const LONG_PRESS_MS: u32 = 480;
 
+/// Max gap between two short clicks that counts as a double-click.
+/// Single clicks are deferred by this window so the double gesture
+/// doesn't also trigger the normal click action.
+const DBL_CLICK_MS: u32 = 400;
+
 /// Flip to `true` when reliable potentiometers are wired back in — the ADC
 /// channels and filters are still constructed below, so this is the only
 /// switch needed to re-enable Pot 0 (GPIO 2) and Pot 1 (GPIO 1).
@@ -121,6 +130,10 @@ pub struct PhysicalInputs<'d> {
     sw_down: bool,
     sw_down_ms: u32,
     sw_long_fired: bool,
+    /// A released short click waiting out the double-click window before
+    /// being dispatched as `encoder_click` (cancelled by a 2nd click).
+    pending_click: bool,
+    pending_click_ms: u32,
     adc: &'static AdcDriver<'static, esp_idf_hal::adc::ADCU1>,
     pot0_ch: AdcChannelDriver<
         'static,
@@ -197,6 +210,8 @@ impl PhysicalInputs<'static> {
             sw_down: false,
             sw_down_ms: 0,
             sw_long_fired: false,
+            pending_click: false,
+            pending_click_ms: 0,
             adc,
             pot0_ch,
             pot1_ch,
@@ -269,9 +284,12 @@ impl InputSource for PhysicalInputs<'static> {
             0
         };
 
-        // 2. Poll encoder push switch (active-low)
+        // 2. Poll encoder push switch (active-low). Single clicks are
+        // deferred by DBL_CLICK_MS so a second click can be recognized as
+        // a double-click instead of firing the click action first.
         let pressed = self.sw.is_low();
         let mut encoder_click = false;
+        let mut encoder_dbl_click = false;
         let mut encoder_long_press = false;
 
         if pressed {
@@ -284,12 +302,29 @@ impl InputSource for PhysicalInputs<'static> {
             {
                 self.sw_long_fired = true;
                 encoder_long_press = true;
+                self.pending_click = false; // hold during window aborts the dbl
             }
         } else if self.sw_down {
             self.sw_down = false;
             if !self.sw_long_fired && now.wrapping_sub(self.sw_down_ms) >= 25 {
-                encoder_click = true;
+                if self.pending_click
+                    && now.wrapping_sub(self.pending_click_ms) <= DBL_CLICK_MS
+                {
+                    // Second click inside the window → double-click, and
+                    // neither click dispatches a normal `encoder_click`.
+                    encoder_dbl_click = true;
+                    self.pending_click = false;
+                } else {
+                    self.pending_click = true;
+                    self.pending_click_ms = now;
+                }
             }
+        }
+
+        // Window expired with no second click → dispatch the deferred click.
+        if self.pending_click && now.wrapping_sub(self.pending_click_ms) > DBL_CLICK_MS {
+            self.pending_click = false;
+            encoder_click = true;
         }
 
         // 3. Poll ADC1 pots (disabled until reliable pots are wired — see
@@ -304,6 +339,7 @@ impl InputSource for PhysicalInputs<'static> {
             encoder_delta,
             param_delta,
             encoder_click,
+            encoder_dbl_click,
             encoder_long_press,
             pot_pct: [self.pot_filters[0].pct, self.pot_filters[1].pct],
             pot_moved,

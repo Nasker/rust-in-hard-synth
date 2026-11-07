@@ -595,6 +595,9 @@ pub struct UiState {
     pub section_vals: [[[u8; 4]; 2]; SECTIONS.len()],
     /// Latest physical pot positions `0..=100` for visual tick markers.
     pub pot_pos: [u8; 2],
+    /// Transient overlay message `(text, deadline_frame)` — e.g. the
+    /// Wi-Fi radio defeat feedback on encoder double-click (~2 s).
+    pub toast: Option<(&'static str, u32)>,
 }
 
 impl Default for UiState {
@@ -623,6 +626,7 @@ impl UiState {
             fx_mix_mem: [50; 4],
             section_vals,
             pot_pos: [0, 0],
+            toast: None,
         }
     }
 
@@ -663,6 +667,25 @@ impl UiState {
     ) {
         self.frame = self.frame.wrapping_add(1);
         self.pot_pos = inp.pot_pct;
+
+        if let Some((_, until)) = self.toast {
+            if self.frame >= until {
+                self.toast = None;
+            }
+        }
+
+        // Rotary double-click toggles the Wi-Fi radio globally — an A/B
+        // test for the ~10 Hz beacon-burst EMI click in the DAC path.
+        // Single clicks are deferred ~400 ms in input.rs so this gesture
+        // doesn't also fire the normal click action.
+        if inp.encoder_dbl_click {
+            let on = web::toggle_wifi_radio();
+            self.toast = Some((
+                if on { "WIFI ON" } else { "WIFI OFF" },
+                self.frame + 50,
+            ));
+            return;
+        }
 
         // Sync HOME macro bars whenever the preset changes
         if snap.preset_idx != self.last_preset_idx {
@@ -879,6 +902,16 @@ pub fn render(state: &UiState, snap: &SystemSnapshot, canvas: &mut Canvas) {
             cursor,
             editing,
         } => render_section(state, sec, page, cursor, editing, canvas, fx),
+    }
+
+    // Transient toast overlay (Wi-Fi radio toggle feedback, ~2 s).
+    if let Some((msg, until)) = state.toast {
+        if state.frame < until {
+            let w = Canvas::str_width(msg, 1) + 10;
+            let x0 = (WIDTH as i32 - w) / 2;
+            canvas.fill_rect(x0, 26, w, 12, true);
+            canvas.draw_str_centered(28, msg, 1, false);
+        }
     }
 }
 

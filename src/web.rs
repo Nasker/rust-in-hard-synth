@@ -232,6 +232,35 @@ pub fn set_arp_enabled(on: bool) {
     ARP_ENABLED.store(on, Ordering::Relaxed);
 }
 
+/// Wi-Fi radio on/off state for the rotary double-click RF-EMI A/B test.
+/// Independent of the WS `wstop` bounce — this one STAYS off until the
+/// user toggles it back (no timer), so the ~10 Hz beacon clicks are easy
+/// to compare. Stopping the radio kills the web UI until re-enabled.
+static WIFI_RADIO_ON: AtomicBool = AtomicBool::new(true);
+
+pub fn wifi_radio_on() -> bool {
+    WIFI_RADIO_ON.load(Ordering::Relaxed)
+}
+
+/// Toggle the Wi-Fi radio. Returns the new state. The actual
+/// `esp_wifi_stop/start` runs on a helper thread so the caller (UI task)
+/// doesn't stall the OLED on the driver's internal waits.
+pub fn toggle_wifi_radio() -> bool {
+    let on = !wifi_radio_on();
+    WIFI_RADIO_ON.store(on, Ordering::Relaxed);
+    let _ = std::thread::Builder::new()
+        .stack_size(3072)
+        .spawn(move || unsafe {
+            if on {
+                esp_wifi_start();
+                esp_wifi_connect();
+            } else {
+                esp_wifi_stop();
+            }
+        });
+    on
+}
+
 pub fn set_riff_done(done: bool) {
     RIFF_DONE.store(done, Ordering::Relaxed);
 }
