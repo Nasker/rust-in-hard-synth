@@ -342,36 +342,46 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut synth = [model::types::StereoSample::ZERO; SYNTH_FRAMES];
     let mut hist = [model::types::StereoSample::ZERO; 4];
 
-    // Boot riff — "Dies Irae" doom arc: a tritone drone descends
-    // chromatically (D → C → Bb → G# landing on the D/G# axis), then a
-    // tritone-plus-minor-second rub, resolving into a sub hit with a low
-    // semitone grind. Six 3-note stabs over 12 alternating steps ≈ 4.5 s,
-    // played once. Each stab keeps the full BootStress patch working
-    // (4 oscs, audio-rate FM, mod matrix, Tube + all FX = ~3.8 voices
-    // under the deadline): strikes stay 128 blocks apart so held notes +
-    // 0.3 s release tails never overlap past 3 voices — every engine
-    // feature is exercised, lates stay near zero, regressions show here.
-    const RIFF: &[[u8; 3]] = &[
-        [38, 44, 50], // D2  Ab2 D3  — tritone drone opens
-        [36, 43, 48], // C2  F#2 C3  — same sonority a semitone down
-        [34, 41, 46], // Bb1 E2  Bb2 — chromatic tritone descent (dread)
-        [32, 38, 44], // G#1 D2  G#2 — lands on the axis
-        [38, 44, 45], // D2  Ab2 A2  — tritone + minor-second rub
-        [26, 38, 39], // D1  D2  Eb2 — sub hit, low semitone grind
+    // Boot riff — dark harmonic-minor showcase: a quick mono run climbs
+    // D harmonic minor (the Bb->C# augmented second is the dark color),
+    // dives back to the dominant A, then rolls strummed triads
+    // i -> V -> iv -> i (V is major in harmonic minor — extra grim).
+    // One ~5 s pass, then Init+.
+    //
+    // Voice math (BootStress = ~3.8 voices under the deadline): mono
+    // steps cost 1 voice; strummed triads roll in over ~2 blocks each
+    // and hold 64, so a chord's 0.3 s tail (~52 blocks) clears the next
+    // strum 120 blocks later — never past ~4 voices, no crackle.
+    const STRIKES: &[(&[u8], u32)] = &[
+        (&[50], 36), // D3  } mono run up
+        (&[52], 36), // E3
+        (&[53], 36), // F3
+        (&[55], 36), // G3
+        (&[57], 36), // A3
+        (&[58], 36), // Bb3
+        (&[61], 36), // C#4
+        (&[62], 36), // D4  } peak of the run
+        (&[61], 36), // C#4 }
+        (&[58], 36), // Bb3  } quick dive
+        (&[57], 36), // A3   } lands on the dominant
+        (&[38, 53, 57], 64),  // i  — Dm:  D2 F3 A3 (strummed)
+        (&[45, 49, 52], 64),  // V  — A:   A2 C#3 E3 (major 3rd = darker)
+        (&[43, 46, 50], 64),  // iv — Gm:  G2 Bb2 D3
+        (&[38, 50, 53], 150), // i  — Dm:  D2 D3 F3 rings out to the end
     ];
-    // Alternating strikes only: Some(i) = strike chord i, None = decay.
-    const SEQ: [Option<usize>; 12] = [
-        Some(0), None, Some(1), None, Some(2), None,
-        Some(3), None, Some(4), None, Some(5), None,
+    // 24-step timeline: 11 mono steps (1 voice each), a beat's rest,
+    // then strummed triads every 3rd step — spacing keeps tails from
+    // overlapping the next chord (64 hold + ~52 tail <= 120 blocks).
+    const SEQ: [Option<usize>; 24] = [
+        Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7),
+        Some(8), Some(9), Some(10), None,
+        Some(11), None, None, Some(12), None, None, Some(13), None,
+        None, Some(14), None, None,
     ];
-    const STEP_BLOCKS: u32 = 64; // eighth note @ ~80 BPM — brooding pace
-    // Stabs struck 128 blocks apart; hold STAB_HOLD then release — with
-    // the patch's 0.3 s tail (~52 blocks) every voice idles ~24 blocks
-    // before the next strike, so the riff runs a strict 3 voices
-    // (~5.1 ms) instead of overlapping into crackle.
-    const STAB_HOLD: u32 = 52;
+    const STEP_BLOCKS: u32 = 40; // ~232 ms — brisk 16ths for the run
+    const STRUM_BLOCKS: u32 = 6; // ~35 ms between chord tones — a roll
     const RIFF_VEL: u8 = 110;
-    const RIFF_LOOPS: u32 = 1; // one ~4.5 s arc — a hit, not a loop
+    const RIFF_LOOPS: u32 = 1; // one arc — a showcase, not a loop
 
     info!("engine: demo riff start");
     let mut blocks: u32 = 0;
@@ -381,8 +391,14 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut peak: f32 = 0.0;   // worst |sample| this second — >1.0 = limiter squashing
     let mut riff_active: bool = true;
     let mut riff_done_flag: bool = false;
-    // (chord index, block struck) — drives the timed stab release.
+    // (strike index, block struck) — drives the per-strike timed release.
     let mut last_stab: Option<(usize, u32)> = None;
+    // Chord-roll state: on a strike, notes are queued and emitted one per
+    // STRUM_BLOCKS (mono strikes are len 1 — they fire immediately).
+    let mut strum_notes = [0u8; 4];
+    let mut strum_len = 0usize;
+    let mut strum_idx = 0usize;
+    let mut strum_next_at = 0u32;
     // True once a factory preset was chosen (USB program change or web
     // UI) — suppresses the post-riff play-patch swap so we don't stomp
     // a deliberate selection.
@@ -485,30 +501,43 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
                 }
             }
             if riff_active {
-                for chord in RIFF {
-                    for &n in chord {
+                for &(notes, _) in STRIKES {
+                    for &n in notes {
                         vm.receive_event(NoteEvent::note_off(n));
                     }
                 }
             }
             riff_active = false;
             last_stab = None;
+            strum_idx = strum_len; // cancel any unstrummed chord tones
         }
 
         if riff_active && blocks % STEP_BLOCKS == 0 {
             let step = (blocks / STEP_BLOCKS) as usize % SEQ.len();
-            if let Some(chord) = SEQ[step] {
-                for &n in &RIFF[chord] {
-                    vm.receive_event(NoteEvent::note_on_midi(n, RIFF_VEL));
-                }
-                last_stab = Some((chord, blocks));
+            if let Some(strike) = SEQ[step] {
+                let (notes, _) = STRIKES[strike];
+                let len = notes.len().min(strum_notes.len());
+                strum_notes[..len].copy_from_slice(&notes[..len]);
+                strum_len = len;
+                strum_idx = 0;
+                strum_next_at = blocks;
+                last_stab = Some((strike, blocks));
             }
         }
-        // Timed stab release — voices finish their 0.3 s tail well before
-        // the next strike lands, so nothing ever overlaps past 3 voices.
-        if let Some((chord, struck)) = last_stab {
-            if blocks.wrapping_sub(struck) == STAB_HOLD {
-                for &n in &RIFF[chord] {
+        // Chord roll — emit one queued note every STRUM_BLOCKS (~35 ms).
+        if riff_active && strum_idx < strum_len && blocks >= strum_next_at {
+            vm.receive_event(NoteEvent::note_on_midi(
+                strum_notes[strum_idx],
+                RIFF_VEL,
+            ));
+            strum_idx += 1;
+            strum_next_at += STRUM_BLOCKS;
+        }
+        // Timed strike release — voices finish their 0.3 s tail well
+        // before the next strike lands, so voices never pile up.
+        if let Some((strike, struck)) = last_stab {
+            if blocks.wrapping_sub(struck) == STRIKES[strike].1 {
+                for &n in STRIKES[strike].0 {
                     vm.receive_event(NoteEvent::note_off(n));
                 }
                 last_stab = None;

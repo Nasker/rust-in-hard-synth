@@ -709,6 +709,29 @@ fn handle_query_one(q: &str) {
                 esp_wifi_set_max_tx_power(v.clamp(4.0, 80.0) as i8);
             }
         }
+        "dl" => {
+            // Software download-mode entry: RTC_CNTL_FORCE_DOWNLOAD_BOOT
+            // makes the NEXT reset boot into the UART downloader regardless
+            // of GPIO0 — the BOOT button never needs touching. The flag is
+            // cleared by the ROM after one download boot, so the following
+            // reset boots the app normally again. Small delay lets this
+            // HTTP response flush first.
+            let _ = std::thread::Builder::new()
+                .stack_size(2048)
+                .spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    unsafe {
+                        let reg = RTC_CNTL_OPTION1_REG as *mut u32;
+                        let cur = core::ptr::read_volatile(reg);
+                        core::ptr::write_volatile(
+                            reg,
+                            cur | (RTC_CNTL_FORCE_DOWNLOAD_BOOT_V
+                                << RTC_CNTL_FORCE_DOWNLOAD_BOOT_S),
+                        );
+                        esp_restart();
+                    }
+                });
+        }
         _ => {}
     }
 }
