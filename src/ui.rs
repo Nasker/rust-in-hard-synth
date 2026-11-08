@@ -920,8 +920,8 @@ fn render_splash(frame: u32, snap: &SystemSnapshot, c: &mut Canvas) {
     c.fill_rect(0, 0, 4, 4, true);
     c.fill_rect(WIDTH as i32 - 4, 0, 4, 4, true);
 
-    c.draw_str_centered(4, "RINSYNTH", 2, true);
-    c.draw_str_centered(20, "ESP32-S3 VA SYNTH", 1, true);
+    c.draw_str_centered(4, "RUST IN", 2, true);
+    c.draw_str_centered(18, "SYNTH", 2, true);
 
     let phase_shift = (frame * 5) as i32;
     let morph = ((frame % 80) as i32 - 40).abs();
