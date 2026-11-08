@@ -342,33 +342,36 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut synth = [model::types::StereoSample::ZERO; SYNTH_FRAMES];
     let mut hist = [model::types::StereoSample::ZERO; 4];
 
-    // Van Halen "Jump" intro riff: ascending stab stabs G → C → F → G in
-    // steady eighths at ~130 BPM. Each stab is a 3-note chord (bass root +
-    // third + fifth); alternating strikes + a 0.3 s release peak at ~4
-    // voices — measured on hardware that's the edge of the deadline for
-    // the full BootStress patch (4 oscs, FM, matrix, Tube + all FX fit only
-    // ~3.8 voices). This is the "heavy but just fits" rule of thumb: every
-    // engine feature is exercised, lates should stay near zero, and any
-    // regression shows up here first. Loops until any MIDI/Web note.
+    // Boot riff — "Dies Irae" doom arc: a tritone drone descends
+    // chromatically (D → C → Bb → G# landing on the D/G# axis), then a
+    // tritone-plus-minor-second rub, resolving into a sub hit with a low
+    // semitone grind. Six 3-note stabs over 12 alternating steps ≈ 4.5 s,
+    // played once. Each stab keeps the full BootStress patch working
+    // (4 oscs, audio-rate FM, mod matrix, Tube + all FX = ~3.8 voices
+    // under the deadline): strikes stay 128 blocks apart so held notes +
+    // 0.3 s release tails never overlap past 3 voices — every engine
+    // feature is exercised, lates stay near zero, regressions show here.
     const RIFF: &[[u8; 3]] = &[
-        [55, 71, 74], // G3 B4 D5
-        [60, 76, 79], // C4 E5 G5
-        [53, 69, 72], // F3 A4 C5
-        [55, 71, 74], // G
+        [38, 44, 50], // D2  Ab2 D3  — tritone drone opens
+        [36, 43, 48], // C2  F#2 C3  — same sonority a semitone down
+        [34, 41, 46], // Bb1 E2  Bb2 — chromatic tritone descent (dread)
+        [32, 38, 44], // G#1 D2  G#2 — lands on the axis
+        [38, 44, 45], // D2  Ab2 A2  — tritone + minor-second rub
+        [26, 38, 39], // D1  D2  Eb2 — sub hit, low semitone grind
     ];
-    // Eighth-note timeline: Some(i) = strike chord i, None = let it ring.
-    // No adjacent strikes — tails decay before the next hit lands.
-    const SEQ: [Option<usize>; 8] = [
-        Some(0), None, Some(1), None, Some(2), None, Some(3), None,
+    // Alternating strikes only: Some(i) = strike chord i, None = decay.
+    const SEQ: [Option<usize>; 12] = [
+        Some(0), None, Some(1), None, Some(2), None,
+        Some(3), None, Some(4), None, Some(5), None,
     ];
-    const STEP_BLOCKS: u32 = 80; // eighth note @ ~65 BPM — half-time feel
-    // Stabs are struck 160 blocks apart; hold each for STAB_HOLD blocks
-    // then release — with the patch's 0.3 s tail (~52 blocks) every voice
-    // is fully idle ~40 blocks before the next strike, so the riff runs a
-    // strict 3 voices (~5.1 ms) instead of overlapping 5-6 into crackle.
-    const STAB_HOLD: u32 = 64;
+    const STEP_BLOCKS: u32 = 64; // eighth note @ ~80 BPM — brooding pace
+    // Stabs struck 128 blocks apart; hold STAB_HOLD then release — with
+    // the patch's 0.3 s tail (~52 blocks) every voice idles ~24 blocks
+    // before the next strike, so the riff runs a strict 3 voices
+    // (~5.1 ms) instead of overlapping into crackle.
+    const STAB_HOLD: u32 = 52;
     const RIFF_VEL: u8 = 110;
-    const RIFF_LOOPS: u32 = 4; // ~10 s of intro, then silence
+    const RIFF_LOOPS: u32 = 1; // one ~4.5 s arc — a hit, not a loop
 
     info!("engine: demo riff start");
     let mut blocks: u32 = 0;
