@@ -366,8 +366,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         (&[69], 18), // A4   } lands on the dominant
         (&[50, 65, 69], 64),  // i  — Dm:  D3 F4 A4 (strummed)
         (&[57, 61, 64], 64),  // V  — A:   A3 C#4 E4 (major 3rd = darker)
-        (&[55, 58, 62], 64),  // iv — Gm:  G3 Bb4 D4
-        (&[50, 62, 65], 150), // i  — Dm:  D3 D4 F4 rings out to the end
+        (&[55, 58, 62], 150), // iv — Gm:  G3 Bb4 D4 rings out to the end
     ];
     // Timeline as (strike, step_blocks) — the run sweeps at ~116 ms/note
     // (2x speed), chord steps hold their 120-block spacing so 0.3 s tails
@@ -379,8 +378,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
         (None, 40),
         (Some(11), 40), (None, 40), (None, 40),
         (Some(12), 40), (None, 40), (None, 40),
-        (Some(13), 40), (None, 40), (None, 40),
-        (Some(14), 40), (None, 80), (None, 40),
+        (Some(13), 40), (None, 80), (None, 40),
     ];
     const SEQ_TOTAL: u32 = {
         let mut t = 0u32;
