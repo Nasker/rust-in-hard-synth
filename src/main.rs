@@ -353,32 +353,44 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     // and hold 64, so a chord's 0.3 s tail (~52 blocks) clears the next
     // strum 120 blocks later — never past ~4 voices, no crackle.
     const STRIKES: &[(&[u8], u32)] = &[
-        (&[50], 36), // D3  } mono run up
-        (&[52], 36), // E3
-        (&[53], 36), // F3
-        (&[55], 36), // G3
-        (&[57], 36), // A3
-        (&[58], 36), // Bb3
-        (&[61], 36), // C#4
-        (&[62], 36), // D4  } peak of the run
-        (&[61], 36), // C#4 }
-        (&[58], 36), // Bb3  } quick dive
-        (&[57], 36), // A3   } lands on the dominant
-        (&[38, 53, 57], 64),  // i  — Dm:  D2 F3 A3 (strummed)
-        (&[45, 49, 52], 64),  // V  — A:   A2 C#3 E3 (major 3rd = darker)
-        (&[43, 46, 50], 64),  // iv — Gm:  G2 Bb2 D3
-        (&[38, 50, 53], 150), // i  — Dm:  D2 D3 F3 rings out to the end
+        (&[62], 18), // D4  } mono run up — one octave higher, 2x speed
+        (&[64], 18), // E4
+        (&[65], 18), // F4
+        (&[67], 18), // G4
+        (&[69], 18), // A4
+        (&[70], 18), // Bb4
+        (&[73], 18), // C#5
+        (&[74], 18), // D5  } peak of the run
+        (&[73], 18), // C#5 }
+        (&[70], 18), // Bb4  } quick dive
+        (&[69], 18), // A4   } lands on the dominant
+        (&[50, 65, 69], 64),  // i  — Dm:  D3 F4 A4 (strummed)
+        (&[57, 61, 64], 64),  // V  — A:   A3 C#4 E4 (major 3rd = darker)
+        (&[55, 58, 62], 64),  // iv — Gm:  G3 Bb4 D4
+        (&[50, 62, 65], 150), // i  — Dm:  D3 D4 F4 rings out to the end
     ];
-    // 24-step timeline: 11 mono steps (1 voice each), a beat's rest,
-    // then strummed triads every 3rd step — spacing keeps tails from
-    // overlapping the next chord (64 hold + ~52 tail <= 120 blocks).
-    const SEQ: [Option<usize>; 24] = [
-        Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7),
-        Some(8), Some(9), Some(10), None,
-        Some(11), None, None, Some(12), None, None, Some(13), None,
-        None, Some(14), None, None,
+    // Timeline as (strike, step_blocks) — the run sweeps at ~116 ms/note
+    // (2x speed), chord steps hold their 120-block spacing so 0.3 s tails
+    // never overlap the next strummed triad (64 hold + ~52 tail <= 120).
+    const SEQ: &[(Option<usize>, u32)] = &[
+        (Some(0), 20), (Some(1), 20), (Some(2), 20), (Some(3), 20),
+        (Some(4), 20), (Some(5), 20), (Some(6), 20), (Some(7), 20),
+        (Some(8), 20), (Some(9), 20), (Some(10), 20),
+        (None, 40),
+        (Some(11), 40), (None, 40), (None, 40),
+        (Some(12), 40), (None, 40), (None, 40),
+        (Some(13), 40), (None, 40), (None, 40),
+        (Some(14), 40), (None, 80), (None, 40),
     ];
-    const STEP_BLOCKS: u32 = 40; // ~232 ms — brisk 16ths for the run
+    const SEQ_TOTAL: u32 = {
+        let mut t = 0u32;
+        let mut i = 0usize;
+        while i < SEQ.len() {
+            t += SEQ[i].1;
+            i += 1;
+        }
+        t
+    };
     const STRUM_BLOCKS: u32 = 6; // ~35 ms between chord tones — a roll
     const RIFF_VEL: u8 = 110;
     const RIFF_LOOPS: u32 = 1; // one arc — a showcase, not a loop
@@ -393,6 +405,10 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
     let mut riff_done_flag: bool = false;
     // (strike index, block struck) — drives the per-strike timed release.
     let mut last_stab: Option<(usize, u32)> = None;
+    // SEQ position tracker: step_idx = which timeline entry fires next,
+    // next_step_at = cumulative block count when it fires.
+    let mut seq_step = 0usize;
+    let mut next_step_at = 0u32;
     // Chord-roll state: on a strike, notes are queued and emitted one per
     // STRUM_BLOCKS (mono strikes are len 1 — they fire immediately).
     let mut strum_notes = [0u8; 4];
@@ -489,7 +505,7 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             web::set_current_bpm(vm.bpm());
         }
 
-        if riff_active && (usb_midi::midi_seen() || blocks >= RIFF_LOOPS * SEQ.len() as u32 * STEP_BLOCKS) {
+        if riff_active && (usb_midi::midi_seen() || blocks >= RIFF_LOOPS * SEQ_TOTAL) {
             if !riff_done_flag {
                 info!("demo riff: done");
                 riff_done_flag = true;
@@ -512,9 +528,11 @@ fn audio_task(mut tx: I2sDriver<'_, I2sTx>, bank: Vec<model::presets::Preset>) {
             strum_idx = strum_len; // cancel any unstrummed chord tones
         }
 
-        if riff_active && blocks % STEP_BLOCKS == 0 {
-            let step = (blocks / STEP_BLOCKS) as usize % SEQ.len();
-            if let Some(strike) = SEQ[step] {
+        if riff_active && blocks == next_step_at {
+            let (strike, step_dur) = SEQ[seq_step];
+            seq_step = (seq_step + 1) % SEQ.len();
+            next_step_at += step_dur;
+            if let Some(strike) = strike {
                 let (notes, _) = STRIKES[strike];
                 let len = notes.len().min(strum_notes.len());
                 strum_notes[..len].copy_from_slice(&notes[..len]);
