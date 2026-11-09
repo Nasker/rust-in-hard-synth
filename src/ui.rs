@@ -693,8 +693,11 @@ impl UiState {
         ];
         for (i, pressed) in inp.button_press.iter().enumerate() {
             if *pressed {
-                self.toggle_fx(i, snap, &mut emit);
-                self.toast = Some((FX_TOAST[i][self.fx_on(snap)[i] as usize], self.frame + 50));
+                // Breadboard row is mirrored vs. the on-screen
+                // DIST·CHRS·DLY·REV order — 3-i puts DIST on the left.
+                let fx = 3 - i;
+                self.toggle_fx(fx, snap, &mut emit);
+                self.toast = Some((FX_TOAST[fx][self.fx_on(snap)[fx] as usize], self.frame + 50));
             }
         }
 
