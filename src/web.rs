@@ -14,6 +14,7 @@ use std::ffi::{CStr, CString};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, ClientConfiguration, Configuration as WifiConfig,
@@ -1205,6 +1206,26 @@ pub fn start(modem: Modem<'static>) -> anyhow::Result<()> {
     let mut wifi = EspWifi::new(modem, sysloop, Some(nvs))?;
     wifi.set_configuration(&WifiConfig::AccessPoint(ap_config()))?;
     wifi.start()?;
+    // The AP netif is created with the stock 192.168.4.1 — re-assign it to
+    // AP_IP so the captive DNS answers, redirects and the OLED status string
+    // actually describe the real interface address.
+    unsafe {
+        let ap = wifi.ap_netif().handle();
+        let _ = esp_netif_dhcps_stop(ap);
+        let ip_info = esp_netif_ip_info_t {
+            ip: esp_ip4_addr_t {
+                addr: u32::from_le_bytes(AP_IP),
+            },
+            netmask: esp_ip4_addr_t {
+                addr: u32::from_le_bytes([255, 255, 255, 0]),
+            },
+            gw: esp_ip4_addr_t {
+                addr: u32::from_le_bytes(AP_IP),
+            },
+        };
+        esp!(esp_netif_set_ip_info(ap, &ip_info))?;
+        esp!(esp_netif_dhcps_start(ap))?;
+    }
     unsafe {
         esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE);
         // TX bursts (AP beacons ~10 Hz + traffic) couple into the DAC analog
@@ -1230,6 +1251,27 @@ pub fn start(modem: Modem<'static>) -> anyhow::Result<()> {
     }
 
     start_captive_dns();
+
+    // mDNS: rustinsynth.local resolves on the SoftAP AND on the home LAN
+    // once STA credentials connect — the captive DNS answers that name on
+    // the AP anyway; this is what matters on a real LAN, where the plain
+    // DNS responder is never reached. mdns attaches to both netifs and
+    // re-announces when addresses change.
+    #[cfg(esp_idf_comp_espressif__mdns_enabled)]
+    unsafe {
+        let _ = mdns_init();
+        let _ = mdns_hostname_set(c"rustinsynth".as_ptr());
+        let _ = mdns_instance_name_set(c"Rust In Synth".as_ptr());
+        let _ = mdns_service_add(
+            core::ptr::null_mut(),
+            c"_http".as_ptr(),
+            c"_tcp".as_ptr(),
+            80,
+            core::ptr::null_mut(),
+            0,
+        );
+        info!("web: mDNS up as rustinsynth.local (_http._tcp:80)");
+    }
 
     unsafe {
         let cfg = httpd_config_t {

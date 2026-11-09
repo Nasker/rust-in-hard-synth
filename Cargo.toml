@@ -27,3 +27,8 @@ embuild = "0.33"
 # ships (revisit on esp toolchain >= fixed LLVM-22).
 [profile.release.package.rinsynth-model]
 opt-level = 0
+
+# mDNS responder (espressif/mdns managed component) — resolves
+# rustinsynth.local on both the SoftAP and the joined home LAN (STA).
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/mdns", version = "1.*" }
