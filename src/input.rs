@@ -1,22 +1,18 @@
 //! Physical input drivers: PCNT quadrature rotary encoder + switch (GPIO 38/39/40)
-//! and ADC1 potentiometers with EMA smoothing + hysteresis deadband (GPIO 2, GPIO 1).
+//! and four FX kill buttons (GPIO 41, 42, 2, 1 — active-low, wired to GND).
 //!
 //! Single responsibility: turn raw hardware signals into debounced, jitter-free
 //! [`InputFrame`] snapshots at the UI frame rate (~25 Hz).
 //!
 //! Confirmed wiring:
-//! - Pot 0 (leftmost column):  `GPIO 2` (ADC1_CH1)
-//! - Pot 1 (second column):    `GPIO 1` (ADC1_CH0)
+//! - FX buttons (L→R):         `GPIO 41`, `GPIO 42`, `GPIO 2`, `GPIO 1`
+//!   (to GND, internal pull-ups; displaced the never-enabled pots on 1/2)
 //! - Rotary Encoder CLK:       `GPIO 38`
 //! - Rotary Encoder DT:        `GPIO 39`
 //! - Rotary Encoder Switch:    `GPIO 40` (active-low with internal pull-up)
 
 use core::time::Duration;
-use esp_idf_hal::adc::attenuation::DB_12;
-use esp_idf_hal::adc::oneshot::config::AdcChannelConfig;
-use esp_idf_hal::adc::oneshot::{AdcChannelDriver, AdcDriver};
-use esp_idf_hal::adc::ADC1;
-use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, Input, PinDriver, Pull};
+use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, Input, PinDriver, Pull};
 use esp_idf_hal::pcnt::config::{
     ChannelConfig, ChannelEdgeAction, ChannelLevelAction, GlitchFilterConfig, UnitConfig,
 };
@@ -42,7 +38,11 @@ pub struct InputFrame {
     pub encoder_dbl_click: bool,
     /// True on the frame a hold crosses 500 ms (acts as BACK / mode toggle).
     pub encoder_long_press: bool,
-    /// Current physical pot positions in 0..=100% (`[pot0_left_gpio2, pot1_gpio1]`).
+    /// Debounced FX kill-button presses, edge-triggered once per actuation.
+    /// Index order = physical left→right = [DIST(41), CHRS(42), DLY(2), REV(1)].
+    pub button_press: [bool; 4],
+    /// Current physical pot positions in 0..=100% — no pots wired (GPIO 1/2
+    /// host the FX buttons); kept at 0 for future re-wire on new pins.
     pub pot_pct: [u8; 2],
     /// `Some(new_pct)` when a pot intentionally moved outside the deadband this frame.
     pub pot_moved: [Option<u8>; 2],
@@ -53,58 +53,19 @@ pub trait InputSource: Send {
     fn poll(&mut self) -> InputFrame;
 }
 
-/// EMA + hysteresis state for one analog potentiometer (12-bit 0..4095).
-struct PotFilter {
-    ema_raw: i32,
-    committed_raw: i32,
-    pct: u8,
-    initialized: bool,
+/// One debounced FX kill button — active-low (wired to GND, internal
+/// pull-up), edge-triggered with a re-trigger lockout that absorbs any
+/// contact bounce still visible across the ~40 ms poll frames.
+struct FxButton {
+    pin: PinDriver<'static, Input>,
+    was_low: bool,
+    last_fire_ms: u32,
 }
 
-impl PotFilter {
-    /// ~1.4% of full scale (58 / 4095) required to break out of rest — kills
-    /// Wi-Fi TX rail noise while feeling instantaneous to a finger turn.
-    const HYSTERESIS_RAW: i32 = 58;
-    /// Clamp endpoints slightly inside 0..4095 so every pot reaches 0% and 100%.
-    const MIN_RAW: i32 = 48;
-    const MAX_RAW: i32 = 4030;
-
-    const fn new() -> Self {
-        Self {
-            ema_raw: 0,
-            committed_raw: 0,
-            pct: 0,
-            initialized: false,
-        }
-    }
-
-    fn raw_to_pct(raw: i32) -> u8 {
-        let clamped = raw.clamp(Self::MIN_RAW, Self::MAX_RAW) - Self::MIN_RAW;
-        let span = Self::MAX_RAW - Self::MIN_RAW;
-        ((clamped * 100 + span / 2) / span).clamp(0, 100) as u8
-    }
-
-    fn update(&mut self, sample_raw: u16) -> Option<u8> {
-        let r = sample_raw as i32;
-        if !self.initialized {
-            self.ema_raw = r;
-            self.committed_raw = r;
-            self.pct = Self::raw_to_pct(r);
-            self.initialized = true;
-            return None;
-        }
-        // 50/50 EMA at 25 Hz (~40 ms time constant)
-        self.ema_raw = (self.ema_raw + r) / 2;
-        if (self.ema_raw - self.committed_raw).abs() >= Self::HYSTERESIS_RAW {
-            self.committed_raw = self.ema_raw;
-            let new_pct = Self::raw_to_pct(self.committed_raw);
-            if new_pct != self.pct {
-                self.pct = new_pct;
-                return Some(new_pct);
-            }
-        }
-        None
-    }
+impl FxButton {
+    /// Min gap between two reported presses — covers multi-frame bounce
+    /// bursts and prevents accidental double-toggles on a sloppy tap.
+    const REFIRE_MS: u32 = 200;
 }
 
 const LONG_PRESS_MS: u32 = 480;
@@ -114,13 +75,11 @@ const LONG_PRESS_MS: u32 = 480;
 /// doesn't also trigger the normal click action.
 const DBL_CLICK_MS: u32 = 400;
 
-/// Flip to `true` when reliable potentiometers are wired back in — the ADC
-/// channels and filters are still constructed below, so this is the only
-/// switch needed to re-enable Pot 0 (GPIO 2) and Pot 1 (GPIO 1).
+/// No potentiometers are wired — GPIO 1/2 now host FX kill buttons. Keep
+/// false: restoring pots needs NEW pins plus the ADC path (see git history).
 pub const POTS_ENABLED: bool = false;
 
-/// Self-owning wrapper: holds `AdcDriver` in a `Box::leak` static reference so
-/// multiple `AdcChannelDriver`s can borrow it without lifetime self-reference.
+/// Hardware input bundle: PCNT encoder + switch + the four FX kill buttons.
 pub struct PhysicalInputs<'d> {
     pcnt: PcntUnitDriver<'d>,
     last_pcnt_count: i32,
@@ -134,18 +93,9 @@ pub struct PhysicalInputs<'d> {
     /// being dispatched as `encoder_click` (cancelled by a 2nd click).
     pending_click: bool,
     pending_click_ms: u32,
-    adc: &'static AdcDriver<'static, esp_idf_hal::adc::ADCU1>,
-    pot0_ch: AdcChannelDriver<
-        'static,
-        esp_idf_hal::adc::ADCCH1<esp_idf_hal::adc::ADCU1>,
-        &'static AdcDriver<'static, esp_idf_hal::adc::ADCU1>,
-    >,
-    pot1_ch: AdcChannelDriver<
-        'static,
-        esp_idf_hal::adc::ADCCH0<esp_idf_hal::adc::ADCU1>,
-        &'static AdcDriver<'static, esp_idf_hal::adc::ADCU1>,
-    >,
-    pot_filters: [PotFilter; 2],
+    /// FX kill buttons in physical left→right order = FX index order
+    /// [DIST, CHRS, DLY, REV] on GPIO 41, 42, 2, 1.
+    buttons: [FxButton; 4],
 }
 
 fn now_ms() -> u32 {
@@ -154,9 +104,10 @@ fn now_ms() -> u32 {
 
 impl PhysicalInputs<'static> {
     pub fn new(
-        adc1: ADC1<'static>,
-        pot0_gpio2: Gpio2<'static>,
-        pot1_gpio1: Gpio1<'static>,
+        btn0_gpio41: Gpio41<'static>,
+        btn1_gpio42: Gpio42<'static>,
+        btn2_gpio2: Gpio2<'static>,
+        btn3_gpio1: Gpio1<'static>,
         enc_clk_gpio38: Gpio38<'static>,
         enc_dt_gpio39: Gpio39<'static>,
         enc_sw_gpio40: Gpio40<'static>,
@@ -192,16 +143,23 @@ impl PhysicalInputs<'static> {
         // 2. Encoder push-switch on GPIO 40 (active-low, internal pull-up)
         let sw = PinDriver::input(enc_sw_gpio40, Pull::Up)?;
 
-        // 3. ADC1 oneshot channels for Pot 0 (GPIO 2, left) and Pot 1 (GPIO 1, second)
-        let adc: &'static AdcDriver<'static, _> = Box::leak(Box::new(AdcDriver::new(adc1)?));
-        let ch_cfg = AdcChannelConfig {
-            attenuation: DB_12,
-            ..Default::default()
-        };
-        let pot0_ch = AdcChannelDriver::new(adc, pot0_gpio2, &ch_cfg)?;
-        let pot1_ch = AdcChannelDriver::new(adc, pot1_gpio1, &ch_cfg)?;
+        // 3. FX kill buttons on GPIO 41, 42, 2, 1 (active-low, internal
+        //    pull-ups) — physical left→right = FX index [DIST,CHRS,DLY,REV].
+        fn mk_btn<P: esp_idf_hal::gpio::InputPin + 'static>(pin: P) -> Result<FxButton, EspError> {
+            Ok(FxButton {
+                pin: PinDriver::input(pin, Pull::Up)?,
+                was_low: false,
+                last_fire_ms: 0,
+            })
+        }
+        let buttons = [
+            mk_btn(btn0_gpio41)?,
+            mk_btn(btn1_gpio42)?,
+            mk_btn(btn2_gpio2)?,
+            mk_btn(btn3_gpio1)?,
+        ];
 
-        let mut this = Self {
+        let this = Self {
             pcnt,
             last_pcnt_count: 0,
             rem_pulses: 0,
@@ -212,31 +170,10 @@ impl PhysicalInputs<'static> {
             sw_long_fired: false,
             pending_click: false,
             pending_click_ms: 0,
-            adc,
-            pot0_ch,
-            pot1_ch,
-            pot_filters: [PotFilter::new(), PotFilter::new()],
+            buttons,
         };
-        // Prime initial pot positions so boot doesn't fire synthetic pot moves.
-        let _ = this.sample_pots();
-        info!(
-            "input: ready — Encoder(GPIO38/39/40) Pots(GPIO2/GPIO1) {}",
-            if POTS_ENABLED { "enabled" } else { "DISABLED" }
-        );
+        info!("input: ready — Encoder(GPIO38/39/40) FXBtns(GPIO41/42/2/1)");
         Ok(this)
-    }
-
-    fn sample_pots(&mut self) -> [Option<u8>; 2] {
-        // 4x oversample average per channel to suppress high-frequency switching noise
-        let mut sum0 = 0u32;
-        let mut sum1 = 0u32;
-        for _ in 0..4 {
-            sum0 += self.adc.read_raw(&mut self.pot0_ch).unwrap_or(0) as u32;
-            sum1 += self.adc.read_raw(&mut self.pot1_ch).unwrap_or(0) as u32;
-        }
-        let m0 = self.pot_filters[0].update((sum0 / 4) as u16);
-        let m1 = self.pot_filters[1].update((sum1 / 4) as u16);
-        [m0, m1]
     }
 }
 
@@ -327,13 +264,17 @@ impl InputSource for PhysicalInputs<'static> {
             encoder_click = true;
         }
 
-        // 3. Poll ADC1 pots (disabled until reliable pots are wired — see
-        // POTS_ENABLED). Reporting None keeps every pot-driven param frozen.
-        let pot_moved = if POTS_ENABLED {
-            self.sample_pots()
-        } else {
-            [None, None]
-        };
+        // 3. FX kill buttons — fire once on the high→low edge; a 200 ms
+        // re-fire lockout absorbs any bounce surviving across poll frames.
+        let mut button_press = [false; 4];
+        for (i, b) in self.buttons.iter_mut().enumerate() {
+            let low = b.pin.is_low();
+            if low && !b.was_low && now.wrapping_sub(b.last_fire_ms) >= FxButton::REFIRE_MS {
+                b.last_fire_ms = now;
+                button_press[i] = true;
+            }
+            b.was_low = low;
+        }
 
         InputFrame {
             encoder_delta,
@@ -341,8 +282,9 @@ impl InputSource for PhysicalInputs<'static> {
             encoder_click,
             encoder_dbl_click,
             encoder_long_press,
-            pot_pct: [self.pot_filters[0].pct, self.pot_filters[1].pct],
-            pot_moved,
+            button_press,
+            pot_pct: [0, 0],
+            pot_moved: [None, None],
         }
     }
 }

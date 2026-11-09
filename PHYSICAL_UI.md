@@ -176,11 +176,11 @@ is untouched. Design:
 
 ## Hardware budget (per AGENTS.md pin rules)
 
-- Pots ×4: ADC1 GPIO1-4 (100 nF at wiper, EMA + ~1% hysteresis — Wi-Fi-safe).
-  NOTE (2026-11-06): GPIO2/GPIO1 pots are flaky hardware — gated behind
-  `POTS_ENABLED=false` in input.rs until replaced; flip the const to re-enable.
+- Pots: NOT WIRED (2026-11-09) — GPIO2/GPIO1 now host FX buttons; restoring
+  pots needs NEW pins plus the ADC path (see input.rs git history).
 - Encoder: PCNT on GPIO38/39 + click on GPIO40 — zero CPU
-- Buttons ×4: GPIO41,42,45,46 (or 47 — all free per budget) → FX kills
+- Buttons ×4: GPIO41,42,2,1 L→R = DIST·CHRS·DLY·REV kills (to GND,
+  internal pull-ups — wired & live 2026-11-09; avoids strapping 45/46)
 - Display: SH1106 1.3" SPI — GPIO 9 (CLK), GPIO 10 (MOSI), GPIO 11 (RES),
   GPIO 12 (DC), GPIO 13 (CS)
 - Status LED: already done (GPIO48)

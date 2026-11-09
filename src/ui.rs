@@ -6,7 +6,7 @@
 //! - [`UiState`]: pure state machine (`Splash` -> `Home` <-> `Menu` <-> `Section`)
 //!   driven by [`InputFrame`] events and emitting [`WebCmd`]s via a sink closure.
 //! - [`render`]: pure view function `(UiState, SystemSnapshot) -> Canvas`.
-//! - [`init`]: wires SPI OLED (`GPIO 9..13`), ADC1 pots (`GPIO 2`, `GPIO 1`),
+//! - [`init`]: wires SPI OLED (`GPIO 9..13`), FX kill buttons (`GPIO 41/42/2/1`),
 //!   and PCNT encoder (`GPIO 38..40`) into the Core 0 UI task (~25 FPS).
 
 use crate::display::{Canvas, Display, Sh1106Spi, HEIGHT, WIDTH};
@@ -14,9 +14,8 @@ use crate::input::{InputFrame, InputSource, PhysicalInputs, POTS_ENABLED};
 use crate::status::{self, Status};
 use crate::usb_midi;
 use crate::web::{self, WebCmd};
-use esp_idf_hal::adc::ADC1;
 use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, OutputPin};
+use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, OutputPin};
 use esp_idf_hal::spi::SpiAnyPins;
 use log::{info, warn};
 use rinsynth_model::params::SynthParam;
@@ -588,8 +587,6 @@ pub struct UiState {
     /// Last non-zero mix (0..=100) per FX stage, restored when un-killing
     /// chorus/delay/reverb (their enable = mix > 0). Distortion has a real
     /// enable flag and does not need a slot here.
-    /// TODO(physical-buttons): read when GPIO 41/42/45/46 kill switches land.
-    #[allow(dead_code)]
     pub fx_mix_mem: [u8; 4],
     /// Live parameter values per `[section][page][col]`.
     pub section_vals: [[[u8; 4]; 2]; SECTIONS.len()],
@@ -635,12 +632,10 @@ impl UiState {
         self.fx_override.unwrap_or(snap.fx_on)
     }
 
-    /// Toggle one FX stage (0=DIST, 1=CHRS, 2=DLY, 3=REV) — the bottom-row
-    /// button mapping. Chorus/Delay/Reverb have no enable flag: killing them
-    /// stores their mix and pushes 0.0; un-killing restores the stored mix.
-    /// Distortion uses `DistEnable` directly.
-    /// TODO(physical-buttons): call when GPIO 41/42/45/46 buttons are wired.
-    #[allow(dead_code)]
+    /// Toggle one FX stage (0=DIST, 1=CHRS, 2=DLY, 3=REV) — driven by the
+    /// physical kill buttons on GPIO 41/42/2/1. Chorus/Delay/Reverb have no
+    /// enable flag: killing them stores their mix and pushes 0.0; un-killing
+    /// restores the stored mix. Distortion uses `DistEnable` directly.
     pub fn toggle_fx(
         &mut self,
         idx: usize,
@@ -685,6 +680,22 @@ impl UiState {
                 self.frame + 50,
             ));
             return;
+        }
+
+        // Physical FX kill buttons (GPIO 41/42/2/1, left→right) — global on
+        // every screen so they work mid-performance. Toast names the new
+        // state; the bottom FX row reflects it via `fx_override`.
+        const FX_TOAST: [[&str; 2]; 4] = [
+            ["DIST OFF", "DIST ON"],
+            ["CHRS OFF", "CHRS ON"],
+            ["DLY OFF", "DLY ON"],
+            ["REV OFF", "REV ON"],
+        ];
+        for (i, pressed) in inp.button_press.iter().enumerate() {
+            if *pressed {
+                self.toggle_fx(i, snap, &mut emit);
+                self.toast = Some((FX_TOAST[i][self.fx_on(snap)[i] as usize], self.frame + 50));
+            }
         }
 
         // Sync HOME macro bars whenever the preset changes
@@ -1277,8 +1288,9 @@ fn ui_task_loop(display: &mut impl Display, inputs: &mut Option<PhysicalInputs<'
     }
 }
 
-/// Initialize the 1.3" SPI OLED (`GPIO 9..13`), ADC1 pots (`GPIO 2`, `GPIO 1`),
-/// and PCNT rotary encoder (`GPIO 38..40`), then spawn the Core 0 UI task.
+/// Initialize the 1.3" SPI OLED (`GPIO 9..13`), FX kill buttons
+/// (`GPIO 41`, `42`, `2`, `1`), and PCNT rotary encoder (`GPIO 38..40`),
+/// then spawn the Core 0 UI task.
 #[allow(clippy::too_many_arguments)]
 pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     spi: SPI,
@@ -1287,9 +1299,10 @@ pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     res: RES,
     dc: DC,
     cs: CS,
-    adc1: ADC1<'static>,
-    pot0_gpio2: Gpio2<'static>,
-    pot1_gpio1: Gpio1<'static>,
+    btn0_gpio41: Gpio41<'static>,
+    btn1_gpio42: Gpio42<'static>,
+    btn2_gpio2: Gpio2<'static>,
+    btn3_gpio1: Gpio1<'static>,
     enc_clk_gpio38: Gpio38<'static>,
     enc_dt_gpio39: Gpio39<'static>,
     enc_sw_gpio40: Gpio40<'static>,
@@ -1302,9 +1315,10 @@ pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     CS: OutputPin + Send + 'static,
 {
     let mut inputs = match PhysicalInputs::new(
-        adc1,
-        pot0_gpio2,
-        pot1_gpio1,
+        btn0_gpio41,
+        btn1_gpio42,
+        btn2_gpio2,
+        btn3_gpio1,
         enc_clk_gpio38,
         enc_dt_gpio39,
         enc_sw_gpio40,

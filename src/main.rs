@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     status::init(p.pins.gpio48);
 
     // 1.3" SPI OLED (SH1106/SSD1306): CLK=GPIO9, MOSI=GPIO10, RES=GPIO11,
-    // DC=GPIO12, CS=GPIO13 + Pot0(left)=GPIO2, Pot1=GPIO1 + Encoder=GPIO38/39/40.
+    // DC=GPIO12, CS=GPIO13 + FX buttons=GPIO41/42/2/1 + Encoder=GPIO38/39/40.
     // Starts the animated SPLASH screen immediately on Core 0.
     ui::init(
         p.spi2,
@@ -70,7 +70,8 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio11,
         p.pins.gpio12,
         p.pins.gpio13,
-        p.adc1,
+        p.pins.gpio41,
+        p.pins.gpio42,
         p.pins.gpio2,
         p.pins.gpio1,
         p.pins.gpio38,
