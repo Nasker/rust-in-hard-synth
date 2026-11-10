@@ -472,7 +472,7 @@
     <div class="sec-hdr">WI-FI NETWORK & CAPTIVE PORTAL</div>
     <div class="grp">
       <div class="grp-title"><span>CURRENT NETWORK STATUS</span></div>
-      <p style="font:11px monospace;color:var(--chrome);margin-bottom:4px">SoftAP (Always Active): <strong style="color:var(--toxic)">rinsynth-esp32</strong> → <strong style="color:var(--gold)">http://192.168.71.1</strong></p>
+      <p style="font:11px monospace;color:var(--chrome);margin-bottom:4px">SoftAP (Always Active): <strong style="color:var(--toxic)">rinsynth-esp32</strong> → <strong style="color:var(--gold)">http://192.168.71.1</strong> · <strong style="color:var(--gold)">http://rustinsynth.local</strong></p>
       <p style="font:11px monospace;color:var(--chrome)">Station (Home Wi-Fi): <strong id="w-status" style="color:var(--gold)">checking...</strong></p>
     </div>
     <div class="grp">
@@ -796,7 +796,7 @@ function refreshWifi() {
     document.getElementById('w-ssid').value = w.ssid || '';
     const st = document.getElementById('w-status');
     if (w.ssid && w.ip && w.ip !== '0.0.0.0') {
-      st.textContent = `Connected to '${w.ssid}' → http://${w.ip}`;
+      st.textContent = `Connected to '${w.ssid}' → http://${w.ip} · http://rustinsynth.local`;
       st.style.color = '#28ff50';
     } else if (w.ssid) {
       st.textContent = `Connecting to '${w.ssid}'... (click Refresh IP in a few seconds)`;

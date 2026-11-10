@@ -10,11 +10,10 @@
 //!   usb_lib    — usb_host_lib_handle_events() pump
 //!   usb_client — client event handling + MIDI interface discovery
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use esp_idf_sys::*;
 use log::info;
-use std::sync::Mutex;
+use rinsynth_esp32::control;
 use rinsynth_model::event::SynthEvent;
 
 // USB-MIDI Code Index Numbers (low nibble of packet byte 0)
@@ -27,120 +26,12 @@ const CIN_PITCH_BEND: u8 = 0xE;
 const CIN_SINGLE_BYTE: u8 = 0xF;
 
 const XFER_SIZE: usize = 256;
-const RING_CAP: usize = 128; // power of two
 
-// ---------------------------------------------------------------------------
-// SPSC ring — single producer (USB client task, core 0), single consumer
-// (audio task, core 1). Wraps SynthEvents; overwrite-on-full drops oldest
-// is *not* what we want (stuck notes) — instead drop the *new* event on
-// overflow. 128 deep is >100 blocks of MIDI traffic; fine.
-// ---------------------------------------------------------------------------
+static DEV_CONNECTED: AtomicBool = AtomicBool::new(false);
 
-struct SpscRing {
-    buf: UnsafeCell<[SynthEvent; RING_CAP]>,
-    head: AtomicUsize, // producer index
-    tail: AtomicUsize, // consumer index
-}
-
-unsafe impl Sync for SpscRing {}
-
-impl SpscRing {
-    const fn new() -> Self {
-        const EV: SynthEvent = SynthEvent {
-            kind: rinsynth_model::event::SynthEventKind::NoteOff,
-            note: 0,
-            velocity: 0.0,
-        };
-        Self {
-            buf: UnsafeCell::new([EV; RING_CAP]),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-        }
-    }
-
-    fn push(&self, ev: SynthEvent) {
-        let h = self.head.load(Ordering::Relaxed);
-        let n = (h + 1) & (RING_CAP - 1);
-        if n == self.tail.load(Ordering::Acquire) {
-            return; // full — drop the new event
-        }
-        unsafe { (*self.buf.get())[h] = ev };
-        self.head.store(n, Ordering::Release);
-    }
-
-    fn pop(&self) -> Option<SynthEvent> {
-        let t = self.tail.load(Ordering::Relaxed);
-        if t == self.head.load(Ordering::Acquire) {
-            return None;
-        }
-        let ev = unsafe { (*self.buf.get())[t] };
-        self.tail
-            .store((t + 1) & (RING_CAP - 1), Ordering::Release);
-        Some(ev)
-    }
-}
-
-static RING: SpscRing = SpscRing::new();
-// The ring has TWO producers (usb_client task and the httpd task via the
-// Web UI keyboard) — serialize pushes so concurrent head/tail interleavings
-// can't drop or double-commit slots. The audio-side pop stays lock-free.
-static PUSH_LOCK: Mutex<()> = Mutex::new(());
-static SEEN: AtomicBool = AtomicBool::new(false);
-static EVENTS: AtomicUsize = AtomicUsize::new(0);
-static PENDING_PROG: AtomicUsize = AtomicUsize::new(usize::MAX);
-/// Pending BPM estimated from incoming USB-MIDI Timing Clock (0xF8, 24 PPQN).
-/// `u32::MAX` means no new clock update since last audio-task poll.
-static PENDING_CLOCK_BPM: AtomicU32 = AtomicU32::new(u32::MAX);
-
-/// True once any MIDI packet has been observed — used to gate the demo
-/// arp off once a real keyboard is in play.
-pub fn midi_seen() -> bool {
-    SEEN.load(Ordering::Relaxed)
-}
-
-/// Total MIDI events queued since boot.
-pub fn event_count() -> usize {
-    EVENTS.load(Ordering::Relaxed)
-}
-
-/// Take a pending MIDI Program Change (or CC 70 preset select), if any.
-pub fn take_program_change() -> Option<u8> {
-    let v = PENDING_PROG.swap(usize::MAX, Ordering::AcqRel);
-    if v == usize::MAX {
-        None
-    } else {
-        Some(v as u8)
-    }
-}
-
-/// Take a pending MIDI Clock BPM update (20..300), if any.
-pub fn take_clock_bpm() -> Option<f32> {
-    let bits = PENDING_CLOCK_BPM.swap(u32::MAX, Ordering::AcqRel);
-    if bits == u32::MAX {
-        None
-    } else {
-        Some(f32::from_bits(bits))
-    }
-}
-
-/// Pop the next queued event (audio task context).
-pub fn pop_event() -> Option<SynthEvent> {
-    RING.pop()
-}
-
-/// Enqueue a synth event from another producer on Core 0 (e.g. Web UI).
-pub fn push_event(ev: SynthEvent) {
-    SEEN.store(true, Ordering::Relaxed);
-    EVENTS.fetch_add(1, Ordering::Relaxed);
-    let _g = PUSH_LOCK.lock();
-    RING.push(ev);
-}
-
-/// Request a preset change by index (0..84).
-/// Does not mark `SEEN` so the demo arp continues playing through new presets
-/// until an actual note is played on the MIDI or browser keyboard.
-pub fn set_program_change(prog: u8) {
-    PENDING_PROG.store(prog as usize, Ordering::Release);
+/// True while a class-compliant USB-MIDI device is attached and claimed.
+pub fn device_connected() -> bool {
+    DEV_CONNECTED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +82,7 @@ unsafe fn on_midi_clock_tick() {
             } else {
                 0.75 * CLOCK_BPM_EMA + 0.25 * inst_bpm
             };
-            PENDING_CLOCK_BPM.store(CLOCK_BPM_EMA.to_bits(), Ordering::Release);
+            control::set_clock_bpm(CLOCK_BPM_EMA);
         }
     }
 }
@@ -206,29 +97,23 @@ unsafe fn parse_packet(p: &[u8]) {
         return;
     }
     let ev = match cin {
-        CIN_NOTE_ON if d2 > 0 => {
-            SEEN.store(true, Ordering::Relaxed);
-            SynthEvent::note_on_midi(d1, d2)
-        }
+        CIN_NOTE_ON if d2 > 0 => SynthEvent::note_on_midi(d1, d2),
         CIN_NOTE_ON | CIN_NOTE_OFF => SynthEvent::note_off(d1),
         CIN_CONTROL => {
             if d1 == 70 {
                 // CC 70 (Sound Variation) -> select preset index
-                PENDING_PROG.store(d2 as usize, Ordering::Release);
+                control::set_program_change(d2);
             }
             SynthEvent::control_change(d1, d2)
         }
         CIN_PROGRAM => {
-            PENDING_PROG.store(d1 as usize, Ordering::Release);
-            EVENTS.fetch_add(1, Ordering::Relaxed);
+            control::record_program_change(d1);
             return;
         }
         CIN_PITCH_BEND => SynthEvent::pitch_bend_midi(((d2 as u16) << 7) | d1 as u16),
         _ => return,
     };
-    EVENTS.fetch_add(1, Ordering::Relaxed);
-    let _g = PUSH_LOCK.lock();
-    RING.push(ev);
+    control::push_midi_event(ev);
 }
 
 unsafe extern "C" fn in_xfer_cb(xfer: *mut usb_transfer_t) {
@@ -309,6 +194,7 @@ unsafe fn try_open_device(dev_addr: u8) {
     (*h.xfer).callback = Some(in_xfer_cb);
     (*h.xfer).num_bytes = XFER_SIZE as i32;
     usb_host_transfer_submit(h.xfer);
+    DEV_CONNECTED.store(true, Ordering::Relaxed);
 
     info!(
         "usb-midi: device ready — intf {} alt {}, IN ep 0x{:02x}",
@@ -329,6 +215,7 @@ unsafe extern "C" fn client_event_cb(
         }
         x if x == usb_host_client_event_t_USB_HOST_CLIENT_EVENT_DEV_GONE => {
             info!("usb-midi: device gone");
+            DEV_CONNECTED.store(false, Ordering::Relaxed);
             let h = &mut *(&raw mut HOST);
             if !h.dev.is_null() {
                 usb_host_interface_release(h.client, h.dev, h.intf_num);

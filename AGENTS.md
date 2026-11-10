@@ -5,9 +5,11 @@ synthesized on-device and output through a PCM5102 DAC. USB-MIDI host via the
 native USB OTG port. Browser control over Wi-Fi SoftAP + HTTP/WebSocket.
 
 Related repos:
-- DSP + model: `/home/oscarmartinez/Documents/PlatformIO/Projects/RustInSynth`
-  (`rinsynth-dsp` crate, `src/embedded.rs` = lean static-dispatch engine,
-  `src/effects.rs` = Distortion→Chorus→PingPongDelay→Reverb chain)
+- DSP + model: `/home/oscarmartinez/Documents/PlatformIO/Projects/audio-tools`
+  (independent workspace; shared crates live under `crates/`;
+  `rinsynth-dsp/src/embedded.rs` = lean static-dispatch engine,
+  `rinsynth-dsp/src/effects.rs` = Distortion→Chorus→PingPongDelay→Reverb chain)
+- Desktop/plugin consumer: `/home/oscarmartinez/Documents/PlatformIO/Projects/RustInSynth`
 - Legacy C reference synth: `/home/oscarmartinez/Documents/PlatformIO/Projects/synth/main/synth.c`
 
 ## Hardware
@@ -22,7 +24,7 @@ Related repos:
 ## Build / flash / test
 
 ```bash
-cd ~/Documents/PlatformIO/Projects/RustInSynth && cargo test -p rinsynth-dsp
+cd ~/Documents/PlatformIO/Projects/audio-tools && cargo test --workspace
 cd ~/Documents/PlatformIO/Projects/rinsynth-esp32 && cargo build --release
 ~/.cargo/bin/espflash flash --port /dev/ttyACM0 --monitor target/xtensa-esp32s3-espidf/release/rinsynth-esp32
 # if auto-reset fails: hold BOOT, tap RESET, release BOOT; use --before no-reset
@@ -129,7 +131,7 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
 - Extrapolated worst case (6 voices + all FX + distortion): ~6800 cyc/sample
   ≈ 7.3 ms — **over deadline** → that is why 6-voice complex patches crackled
 
-### CPU governor (main.rs audio loop)
+### CPU governor (`src/audio/governor.rs`, called by `src/audio_task.rs`)
 
 - Warm-up: no shedding for the first `WARMUP_BLOCKS` (~10 s) — Wi-Fi/HTTP
   bring-up starves the render core and would otherwise shed before the
@@ -155,27 +157,18 @@ i16-conversion clipping — observed 0.2-0.3 under load, so the limiter works).
   fade, which pinned the governor in a zombie-shed loop until the
   <=100 ms skip was added. Keep the shed fade below that threshold or
   adjust both.
-- The **boot riff is the standing worst case** ("BootStress" preset in
-  `main.rs`): 4-note stabs (bass root + triad → tails overlap past the
-  6-voice pool), all 4 PolyBLEP oscs sounding, Osc4→Osc1Pitch audio-rate
-  FM + LFO2→Resonance + Env3→Osc3Pw matrix routes, and Distortion(Tube)
-  →Chorus→Delay→Reverb all on. It is deliberately over the full-rate
-  budget — expect early lates during warm-up, then `cpu-guard` sheds
-  until the render fits. If the riff ever plays clean start to finish,
-  every user patch has headroom to spare.
-- User ceiling: `Poly` slider (1-6) in the UI → `pcap` key →
-  `WebCmd::VoiceCap` → `USER_VOICE_CAP` atomic; governor clamps to it.
-  Default 5 (Prophet-5-style safe ceiling; 6 stays reachable per-patch)
-- BootStress riff (main.rs): deliberately near-maximal patch (4 PolyBLEP
-  oscs, Osc4→Osc1Pitch FM, 3 matrix slots, Tube + Chorus + Delay +
-  Reverb — fits only ~3.8 voices under the 5.8 ms deadline) playing
-  alternating 3-note stabs. Stabs release on a STAB_HOLD=64-block timer
-  (strikes land 160 blocks apart, 0.3 s tail ≈ 52 blocks) so voices go
-  idle ~40 blocks before the next hit — strict 3 voices ≈ 5.0 ms,
-  zero lates. Releasing at the *next* strike instead overlapped 5-6
-  voices and crackled; keep the timed release. If it ever crackles, a
-  real patch can too. On riff end/cancel it swaps to `Init+` unless the
-  user already picked a preset — never leave it as the play patch.
+- BootStress (`src/audio/patches.rs`) enables four oscillators, Osc4→Osc1Pitch
+  audio-rate FM, three modulation slots, Tube distortion and all stereo FX.
+  It is a demanding diagnostic patch, not proof that every possible patch fits.
+- User ceiling: `Poly` slider (1-6) → `pcap` → `SynthCommand::VoiceCap` →
+  control-state atomic; governor clamps to it. Default 5, pool size 6.
+- The current boot showcase (`src/audio/boot_demo.rs`) is a single 660-block
+  harmonic-minor sweep followed by strummed i→V→iv. Sweep steps are 20 blocks;
+  chord rolls are 6 blocks per tone. First two chords release after 64 blocks,
+  the final iv after 150. Timed releases avoid excessive tail overlap.
+- Demo completion/cancellation switches to Init+ unless a factory preset was
+  selected, releases demo pitches and cancels pending strums. USB NoteOn or
+  browser note input cancels it; preset selection alone does not.
 - `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n` — Core 1 is a dedicated RT
   render loop that legitimately starves IDLE1; the WDT backtrace itself
   stalled render ~20 ms. Real overruns are reported via `late:` instead.
@@ -298,12 +291,12 @@ wiring away from the module antenna.
 
 ### Physical Hardware UI (OLED + Rotary Encoder + Pots + Buttons)
 
-- **Shared Core 0 control surface**: `web::push_cmd(WebCmd)` is mutex-serialized
-  on the producer side (`CMD_PUSH_LOCK`) while keeping the Core 1 audio consumer
-  lock-free, so a physical `ui_task` on Core 0 can push `WebCmd`s alongside the
-  HTTP/WS server. `web::current_bpm()`, `web::current_preset_index()`,
-  `web::user_voice_cap()`, and `web::BEAT_DIVISIONS` provide lock-free readouts
-  for an OLED status header.
+- **Shared Core 0 control surface**: `control::push_cmd(SynthCommand)` serializes
+  producers while keeping the unique Core 1 audio consumer lock-free. Both the
+  physical UI task and HTTP/WS adapter use this transport-neutral API.
+  `control::current_bpm()`, `control::current_preset_index()`,
+  `control::user_voice_cap()`, and `control::BEAT_DIVISIONS` provide readouts
+  and shared constants for the OLED status header.
 - **Pin & ADC rules**:
   - Occupied: `GPIO 4, 5, 6, 7` (PCM5102 I2S), `GPIO 19, 20` (USB OTG),
     `GPIO 43, 44` (UART0), `GPIO 26–37` (Flash/Octal PSRAM).
@@ -312,12 +305,35 @@ wiring away from the module antenna.
     software EMA + ~1% hysteresis deadband so Wi-Fi TX bursts don't jitter knobs.
   - **Rotary encoder**: use hardware `PCNT` peripheral (e.g., `GPIO 38, 39`,
     switch on `GPIO 40`) — zero CPU interrupt overhead.
-  - **OLED (128×64 SSD1306/SH1106)**: I2C @ 400 kHz–1 MHz (`GPIO 8, 9`) or SPI
-    DMA (`GPIO 10–13`), driven from a low-priority Core 0 task (~20–30 FPS).
+  - **OLED (128×64 1.3" SH1106 SPI, `src/display.rs` + `src/ui.rs`)**: SPI2 DMA
+    on `GPIO 9` (CLK), `GPIO 10` (MOSI), `GPIO 11` (RES), `GPIO 12` (DC),
+    `GPIO 13` (CS), driven from a low-priority Core 0 task (~25 FPS).
   - **Status LED (`src/status.rs`)**: onboard WS2812 on `GPIO 48` via RMT
     (`TxChannelDriver` + `SimpleEncoder`) behind `trait Indicator`; lock-free
     atomic producer API (`status::set(Status)` / `status::notify(Event)`).
   - Full state-machine / softkey / macro / arpeggiator plan lives in `PHYSICAL_UI.md`.
+
+## Firmware boundaries and host verification
+
+- `src/main.rs` is the composition root; `src/startup.rs` owns big-stack model
+  initialization/prewarming; `src/audio_task.rs` owns the ESP-IDF audio task.
+- `src/lib.rs` exposes HAL-independent firmware policies. `src/audio/` contains
+  the boot scheduler/patches, governor, PCM renderer and telemetry. `src/control/`
+  owns `SynthCommand`, dispatch, immutable preset metadata, atomics and queues.
+- Web, USB and physical UI adapters use `control`, not each other's synth APIs.
+  `UiState::step` emits `UiAction`; only the task adapter executes Wi-Fi/preset actions.
+- Host tests: `cargo +stable test --lib --target x86_64-unknown-linux-gnu` from
+  this repo. ESP-IDF dependencies are target-specific; target build remains
+  `cargo build --release`. Shared DSP/model tests run in the sibling audio-tools workspace.
+- Queue producers serialize with a mutex; audio exclusively owns each receiver
+  and pops without locking. Full queues reject new items and count drops.
+  Command overflow no longer advances the consumer index. MIDI NoteOff overflow
+  recovery and slider coalescing remain follow-up work.
+- This extraction retains DSP-only timing, audio-task logging, unbounded drains,
+  observational (not coherent) atomic readouts, and the rate-switch allocation
+  exception. Do not mistake structural cleanup for resolving those policies.
+- After audio refactors, remeasure hardware render/late counts, internal heap and
+  stack high-water mark; host tests and a target build do not prove timing safety.
 
 ## Conventions
 

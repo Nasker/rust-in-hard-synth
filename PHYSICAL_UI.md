@@ -86,13 +86,21 @@ pages" model as Nord/Peak/Hydrasynth.
 - **4 pots** along the TOP of the screen → every parameter page is exactly
   4 columns, each column aligned under its pot. Label/value live above
   the pot line.
-- **4 buttons** along the BOTTOM → contextual softkeys, labels rendered
-  on the screen's bottom row. This replaces the long-press grammar:
-  always-on-screen hints (e.g. `BACK · ◄PAGE · PAGE► · ENTER` on MENU,
-  `BACK · · · RESET` on a param page). Function changes per screen —
-  the screen IS the legend.
+- **4 buttons** along the BOTTOM → **FX kill switches** (decided
+  2026-11-06 — contextual nav softkeys were redundant; the encoder
+  already navigates). Fixed mapping on every screen:
+  `DIST · CHRS · DLY · REV`. Kill = push the stage's mix to 0 with the
+  last mix remembered for restore (enable = mix > 0); distortion uses
+  its dedicated enable flag. The bottom row of the display shows the
+  same four slots — filled = stage active, hollow = killed — so the
+  strip doubles as a live FX-state readout before the buttons exist.
 - **Rotary encoder with click** on the right side → primary navigation:
-  rotate = move focus / adjust value, click = confirm/enter.
+  rotate = move focus / adjust value, click = confirm/enter,
+  long-press = back / mode toggle. Rotation is **velocity-scaled for
+  continuous parameters** (`InputFrame.param_delta`: detents arriving
+  faster than ~1/60 ms steps ×4, ~1/120 ms ×2) while discrete
+  navigation (presets, cursors) stays 1:1 — fast spins sweep quickly,
+  slow turns dial one step at a time, values never teleport.
 - **Display**: 1.3" SPI monochrome OLED — almost certainly **SH1106**
   (SSD1306 is the 0.96" variant). Driver consequences:
   - **Page-addressing only** (no horizontal mode like SSD1306) — flush
@@ -101,7 +109,7 @@ pages" model as Nord/Peak/Hydrasynth.
   - **+2 column RAM offset** — its internal RAM is 132 wide; column 0 of
     the visible panel starts at RAM column 2. One offset in the flush
     routine, invisible to everything above it.
-  - SPI + DMA on GPIO10–13 → full-frame 1 KB writes are cheap; ~25-30 fps
+  - SPI + DMA on GPIO 9–13 → full-frame 1 KB writes are cheap; ~25-30 fps
     refresh is trivial headroom.
 
 ## HOME macros — category defaults + per-preset override (confirmed)
@@ -148,11 +156,12 @@ is untouched. Design:
    mean stale positions. Standard fix is **catch/pickup**: a pot doesn't
    edit until it crosses the current value. Recommend pickup everywhere
    (prevents jumps when entering a page); cheap to implement per-slot.
-2. **Button grammar** — 4 softkeys gives each screen its own labelled
-   actions. Proposed defaults: BTN1 = BACK everywhere (consistent muscle
-   memory), BTN4 = ENTER/confirm, middle two = screen-specific (page
-   prev/next, reset, fine/coarse). Only rule: never leave a button's
-   label blank — unlabeled = dead button is a UX bug.
+2. **Button grammar** — RESOLVED (2026-11-06): the 4 bottom buttons are
+   FX kill switches `DIST · CHRS · DLY · REV` on every screen, chosen
+   over contextual nav softkeys because the encoder already covers
+   navigate/confirm/back. `UiState::toggle_fx()` implements the
+   kill/restore semantics; `fx_override`/`fx_mix_mem` hold live state,
+   and `PresetSummary.fx_on` feeds the OLED row from each preset.
 3. **Glyph set** — 16×16 icon tiles: Wi-Fi link, MIDI plug, OSC waveforms,
    filter curve, ENV shape, LFO wave, matrix grid, FX bubbles, voices,
    gear. Small bitmap font (5×7 or 8×8) for text + preset names.
@@ -167,10 +176,13 @@ is untouched. Design:
 
 ## Hardware budget (per AGENTS.md pin rules)
 
-- Pots ×4: ADC1 GPIO1-4 (100 nF at wiper, EMA + ~1% hysteresis — Wi-Fi-safe)
+- Pots: NOT WIRED (2026-11-09) — GPIO2/GPIO1 now host FX buttons; restoring
+  pots needs NEW pins plus the ADC path (see input.rs git history).
 - Encoder: PCNT on GPIO38/39 + click on GPIO40 — zero CPU
-- Buttons ×4: GPIO41,42,45,46 (or 47 — all free per budget)
-- Display: SH1106 SPI — GPIO10(SCK) 11(MOSI) 12(DC) 13(CS) (+RESET any free)
+- Buttons ×4: GPIO41,42,2,1 L→R = DIST·CHRS·DLY·REV kills (to GND,
+  internal pull-ups — wired & live 2026-11-09; avoids strapping 45/46)
+- Display: SH1106 1.3" SPI — GPIO 9 (CLK), GPIO 10 (MOSI), GPIO 11 (RES),
+  GPIO 12 (DC), GPIO 13 (CS)
 - Status LED: already done (GPIO48)
 
 ## Milestones (each independently flashable)
