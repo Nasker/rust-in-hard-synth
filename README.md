@@ -115,7 +115,7 @@ Hardware firmware port of [RustInSynth](https://github.com/Nasker/RustInSynth) r
 
 ### Prerequisites
 
-This firmware builds against the portable `rinsynth-model` and `rinsynth-dsp` workspace crates from a sibling [RustInSynth](https://github.com/Nasker/RustInSynth) checkout (`../RustInSynth/crates/rinsynth-*`) and the Xtensa `esp` Rust toolchain:
+This firmware builds against the portable `rinsynth-model` and `rinsynth-dsp` crates in the independent sibling `audio-tools` workspace (`../audio-tools/crates/rinsynth-*`). RustInSynth uses the same shared source; its desktop checkout is no longer a firmware build dependency. Keep `audio-tools` next to this repository. The firmware also requires the Xtensa `esp` Rust toolchain:
 
 ```bash
 cargo install espup espflash ldproxy
@@ -126,7 +126,7 @@ espup install
 ### Run Host DSP Tests
 
 ```bash
-cd ../RustInSynth && cargo test -p rinsynth-dsp --lib
+cd ../audio-tools && cargo test --workspace
 ```
 
 ### Build & Flash to ESP32-S3

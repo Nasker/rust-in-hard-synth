@@ -2,9 +2,9 @@
 //!
 //! Strict SRP separation:
 //! - [`SystemSnapshot`]: read-only view of synth/network/MIDI health gathered
-//!   via lock-free atomics from `status`, `web`, and `usb_midi`.
+//!   via `control` readouts and the status/network/USB adapters.
 //! - [`UiState`]: pure state machine (`Splash` -> `Home` <-> `Menu` <-> `Section`)
-//!   driven by [`InputFrame`] events and emitting [`WebCmd`]s via a sink closure.
+//!   driven by [`InputFrame`] events and emitting [`UiAction`]s via a sink closure.
 //! - [`render`]: pure view function `(UiState, SystemSnapshot) -> Canvas`.
 //! - [`init`]: wires SPI OLED (`GPIO 9..13`), FX kill buttons (`GPIO 41/42/2/1`),
 //!   and PCNT encoder (`GPIO 38..40`) into the Core 0 UI task (~25 FPS).
@@ -13,12 +13,13 @@ use crate::display::{Canvas, Display, Sh1106Spi, HEIGHT, WIDTH};
 use crate::input::{InputFrame, InputSource, PhysicalInputs, POTS_ENABLED};
 use crate::status::{self, Status};
 use crate::usb_midi;
-use crate::web::{self, WebCmd};
+use crate::web;
+use rinsynth_esp32::control::{self, SynthCommand};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, OutputPin};
 use esp_idf_hal::spi::SpiAnyPins;
 use log::{info, warn};
-use rinsynth_model::params::SynthParam;
+use rinsynth_esp32::ui_parameters::ParamTarget;
 
 const FPS_DELAY_MS: u32 = 40; // 25 FPS
 const SPLASH_MIN_FRAMES: u32 = 135; // ~5.4 s presentation animation
@@ -26,193 +27,6 @@ const SPLASH_MIN_FRAMES: u32 = 135; // ~5.4 s presentation animation
 // ---------------------------------------------------------------------------
 // Declarative Section & Parameter Page Tables (SRP: data, not code)
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ParamTarget {
-    Cutoff,
-    Resonance,
-    FilterEnvAmt,
-    FilterAttack,
-    FilterDecay,
-    FilterSustain,
-    FilterRelease,
-    AmpAttack,
-    AmpDecay,
-    AmpSustain,
-    AmpRelease,
-    Env3Attack,
-    Env3Decay,
-    Env3Sustain,
-    Env3Release,
-    Osc1Wave,
-    Osc1Level,
-    Osc2Wave,
-    Osc2Level,
-    Osc2Semi,
-    Osc2Detune,
-    Osc3Wave,
-    Osc3Level,
-    Osc4Wave,
-    Osc4Level,
-    Lfo1Rate,
-    Lfo1Depth,
-    Lfo2Rate,
-    Lfo2Depth,
-    Glide,
-    StereoWidth,
-    MasterVol,
-    DistDrive,
-    DistMix,
-    ChorusRate,
-    ChorusDepth,
-    ChorusMix,
-    DelayTime,
-    DelayFb,
-    DelayMix,
-    RevRoom,
-    RevDamp,
-    RevMix,
-    PolyMode,
-    UnisonVoices,
-    UnisonDetune,
-    UnisonSpread,
-    ArpOn,
-    ArpHold,
-    ArpMode,
-    ArpRate,
-    ArpOct,
-}
-
-impl ParamTarget {
-    /// Convert a normalized `0..=100` UI value into a [`WebCmd`] for the audio engine.
-    pub fn to_cmd(self, pct: u8) -> WebCmd {
-        let norm = (pct.min(100) as f32) * 0.01;
-        // Exponential 0.005..2.0 s envelope time mapping
-        let env_t = |n: f32| 0.005 + n * n * 1.995;
-        match self {
-            Self::Cutoff => {
-                // Logarithmic 20 Hz .. 20 kHz
-                let hz = 20.0 * (1000.0f32).powf(norm);
-                WebCmd::Param(SynthParam::FilterCutoff, hz)
-            }
-            Self::Resonance => WebCmd::Param(SynthParam::FilterResonance, norm * 0.95),
-            Self::FilterEnvAmt => {
-                WebCmd::Param(SynthParam::FilterEnvAmount, norm * 2.0 - 1.0)
-            }
-            Self::FilterAttack => WebCmd::Param(SynthParam::FilterAttack, env_t(norm)),
-            Self::FilterDecay => WebCmd::Param(SynthParam::FilterDecay, env_t(norm)),
-            Self::FilterSustain => WebCmd::Param(SynthParam::FilterSustain, norm),
-            Self::FilterRelease => WebCmd::Param(SynthParam::FilterRelease, env_t(norm)),
-            Self::AmpAttack => WebCmd::Param(SynthParam::Attack, env_t(norm)),
-            Self::AmpDecay => WebCmd::Param(SynthParam::Decay, env_t(norm)),
-            Self::AmpSustain => WebCmd::Param(SynthParam::Sustain, norm),
-            Self::AmpRelease => WebCmd::Param(SynthParam::Release, env_t(norm)),
-            Self::Env3Attack => WebCmd::Env3Attack(env_t(norm)),
-            Self::Env3Decay => WebCmd::Env3Decay(env_t(norm)),
-            Self::Env3Sustain => WebCmd::Env3Sustain(norm),
-            Self::Env3Release => WebCmd::Env3Release(env_t(norm)),
-            Self::Osc1Wave => WebCmd::Param(SynthParam::Osc1Waveform, self.index(pct) as f32),
-            Self::Osc1Level => WebCmd::Param(SynthParam::Osc1Level, norm),
-            Self::Osc2Wave => WebCmd::Param(SynthParam::Osc2Waveform, self.index(pct) as f32),
-            Self::Osc2Level => WebCmd::Param(SynthParam::Osc2Level, norm),
-            Self::Osc2Semi => {
-                let semi = ((norm * 48.0).round() - 24.0).clamp(-24.0, 24.0);
-                WebCmd::Param(SynthParam::Osc2Semitones, semi)
-            }
-            Self::Osc2Detune => {
-                let cents = ((norm * 100.0).round() - 50.0).clamp(-50.0, 50.0);
-                WebCmd::Param(SynthParam::Osc2Cents, cents)
-            }
-            Self::Osc3Wave => WebCmd::Param(SynthParam::Osc3Waveform, self.index(pct) as f32),
-            Self::Osc3Level => WebCmd::Param(SynthParam::Osc3Level, norm),
-            Self::Osc4Wave => WebCmd::Param(SynthParam::Osc4Waveform, self.index(pct) as f32),
-            Self::Osc4Level => WebCmd::Param(SynthParam::Osc4Level, norm),
-            Self::Lfo1Rate => WebCmd::Param(SynthParam::LfoRate, 0.1 + norm * norm * 19.9),
-            Self::Lfo1Depth => WebCmd::Param(SynthParam::LfoDepth, norm),
-            Self::Lfo2Rate => WebCmd::Lfo2Rate(0.1 + norm * norm * 19.9),
-            Self::Lfo2Depth => WebCmd::Lfo2Depth(norm),
-            Self::Glide => WebCmd::Param(SynthParam::PortamentoTime, norm * norm * 0.5),
-            Self::StereoWidth => WebCmd::Param(SynthParam::StereoWidth, norm * 2.0),
-            Self::MasterVol => WebCmd::Param(SynthParam::MasterVolume, norm),
-            Self::DistDrive => {
-                web::push_cmd(WebCmd::DistEnable(pct > 2));
-                WebCmd::DistDrive(norm)
-            }
-            Self::DistMix => WebCmd::DistMix(norm),
-            Self::ChorusRate => WebCmd::ChorusRate(0.1 + norm * 4.9),
-            Self::ChorusDepth => WebCmd::ChorusDepth(norm * 10.0),
-            Self::ChorusMix => WebCmd::ChorusMix(norm),
-            Self::DelayTime => WebCmd::DelayTime(0.02 + norm * 1.18),
-            Self::DelayFb => WebCmd::DelayFb(norm * 0.90),
-            Self::DelayMix => WebCmd::DelayMix(norm),
-            Self::RevRoom => WebCmd::RevRoom(norm),
-            Self::RevDamp => WebCmd::RevDamp(norm),
-            Self::RevMix => WebCmd::RevMix(norm),
-            Self::PolyMode => WebCmd::PolyMode(self.index(pct) == 1),
-            Self::UnisonVoices => WebCmd::Unison(1 + self.index(pct) as u8),
-            Self::UnisonDetune => WebCmd::UniDetune(norm * 50.0),
-            Self::UnisonSpread => WebCmd::UniSpread(norm),
-            Self::ArpOn => WebCmd::ArpOn(self.index(pct) == 1),
-            Self::ArpHold => WebCmd::ArpHold(self.index(pct) == 1),
-            Self::ArpMode => WebCmd::ArpMode(self.index(pct) as u8),
-            Self::ArpRate => {
-                // Stepped beat divisions, slow -> fast: 1/2 .. 1/32.
-                const DIVS: [f32; 7] = [2.0, 1.0, 0.75, 0.5, 0.375, 0.25, 0.125];
-                WebCmd::ArpRate(DIVS[self.index(pct)])
-            }
-            Self::ArpOct => WebCmd::ArpOct(1 + self.index(pct) as u8),
-        }
-    }
-
-    /// Number of discrete positions for stepped params (binary toggles,
-    /// mode selects, octave counts). `None` = continuous 0..100 control —
-    /// stepped params edit one position per detent, not a % of a bar.
-    pub fn steps(self) -> Option<u8> {
-        match self {
-            Self::ArpOn | Self::ArpHold | Self::PolyMode => Some(2),
-            Self::ArpMode | Self::ArpOct => Some(4),
-            Self::ArpRate => Some(7),
-            Self::UnisonVoices => Some(6),
-            Self::Osc1Wave | Self::Osc2Wave | Self::Osc3Wave | Self::Osc4Wave => Some(5),
-            _ => None,
-        }
-    }
-
-    /// Discrete index `0..steps-1` a normalized pct falls into.
-    pub fn index(self, pct: u8) -> usize {
-        let s = self.steps().unwrap_or(1) as usize;
-        ((pct as usize * s) / 100).min(s - 1)
-    }
-
-    /// Mid-bucket pct for index `i` — maps back to the same index under
-    /// [`index`](Self::index) (floor buckets don't round-trip for odd
-    /// step counts, so we aim at the bucket's center).
-    pub fn index_pct(self, idx: usize) -> u8 {
-        let s = self.steps().unwrap_or(1) as usize;
-        ((idx * 2 + 1) * 50 / s) as u8
-    }
-
-    /// Human-readable label for discrete/stepped parameters (shown instead
-    /// of the raw 0-100 number on the SECTION page). `None` = numeric.
-    /// Index math matches [`index`](Self::index) / [`steps`](Self::steps).
-    pub fn value_label(self, pct: u8) -> Option<&'static str> {
-        let i = self.index(pct);
-        match self {
-            Self::ArpOn | Self::ArpHold => Some(if i == 1 { "ON" } else { "OFF" }),
-            Self::PolyMode => Some(if i == 1 { "POLY" } else { "MONO" }),
-            Self::ArpMode => Some(["UP", "DOWN", "U/DN", "RND"][i]),
-            Self::ArpRate => {
-                Some(["1/2", "1/4", "1/8D", "1/8", "16D", "1/16", "1/32"][i])
-            }
-            Self::ArpOct => Some(["1", "2", "3", "4"][i]),
-            Self::UnisonVoices => Some(["1", "2", "3", "4", "5", "6"][i]),
-            Self::Osc1Wave | Self::Osc2Wave | Self::Osc3Wave | Self::Osc4Wave => {
-                Some(["SIN", "SQR", "SAW", "TRI", "NSE"][i])
-            }
-            _ => None,
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct PageSlot {
@@ -482,9 +296,18 @@ pub const fn category_macro_labels(category: &str) -> [&'static str; 4] {
 // Read-only System Snapshot
 // ---------------------------------------------------------------------------
 
+/// Effects requested by the pure UI reducer; executed by the UI task adapter.
+#[derive(Clone)]
+pub enum UiAction {
+    Command(SynthCommand),
+    SelectPreset(u8),
+    ToggleWifiRadio,
+}
+
 #[derive(Clone)]
 pub struct SystemSnapshot {
     pub status: Status,
+    pub wifi_radio_on: bool,
     pub midi_connected: bool,
     pub midi_flash: bool,
     pub overload_flash: bool,
@@ -509,11 +332,11 @@ pub struct SystemSnapshot {
 impl SystemSnapshot {
     pub fn collect() -> Self {
         let st = status::snapshot();
-        let riff_done = web::riff_done();
-        let raw_idx = web::current_preset_index();
+        let riff_done = control::riff_done();
+        let raw_idx = control::current_preset_index();
 
         let (preset_idx, preset_name, preset_category, is_mono, macro_pct, fx_on) =
-            if let Some(summary) = web::preset_summary(raw_idx) {
+            if let Some(summary) = control::preset_summary(raw_idx) {
                 (
                     Some(raw_idx),
                     summary.name.as_str(),
@@ -531,19 +354,20 @@ impl SystemSnapshot {
 
         Self {
             status: st.status,
-            midi_connected: usb_midi::device_connected() || usb_midi::midi_seen(),
+            wifi_radio_on: web::wifi_radio_on(),
+            midi_connected: usb_midi::device_connected() || control::midi_seen(),
             midi_flash: st.midi_active,
             overload_flash: st.overload_active,
             riff_done,
-            active_voices: web::active_voices(),
-            voice_cap: web::user_voice_cap(),
-            bpm: web::current_bpm().round() as u16,
+            active_voices: control::active_voices(),
+            voice_cap: control::user_voice_cap(),
+            bpm: control::current_bpm().round() as u16,
             preset_idx,
-            preset_count: web::preset_count().max(1),
+            preset_count: control::preset_count().max(1),
             preset_name,
             preset_category,
             is_mono,
-            arp_on: web::arp_enabled(),
+            arp_on: control::arp_enabled(),
             macro_labels: category_macro_labels(preset_category),
             macro_targets: category_macro_targets(preset_category),
             macro_pct,
@@ -640,17 +464,17 @@ impl UiState {
         &mut self,
         idx: usize,
         snap: &SystemSnapshot,
-        emit: &mut impl FnMut(WebCmd),
+        emit: &mut impl FnMut(SynthCommand),
     ) {
         let mut on = self.fx_on(snap);
         on[idx] = !on[idx];
         self.fx_override = Some(on);
         let mix = self.fx_mix_mem[idx] as f32 / 100.0;
         match idx {
-            0 => emit(WebCmd::DistEnable(on[0])),
-            1 => emit(WebCmd::ChorusMix(if on[1] { mix } else { 0.0 })),
-            2 => emit(WebCmd::DelayMix(if on[2] { mix } else { 0.0 })),
-            _ => emit(WebCmd::RevMix(if on[3] { mix } else { 0.0 })),
+            0 => emit(SynthCommand::DistEnable(on[0])),
+            1 => emit(SynthCommand::ChorusMix(if on[1] { mix } else { 0.0 })),
+            2 => emit(SynthCommand::DelayMix(if on[2] { mix } else { 0.0 })),
+            _ => emit(SynthCommand::RevMix(if on[3] { mix } else { 0.0 })),
         }
     }
 
@@ -658,7 +482,7 @@ impl UiState {
         &mut self,
         inp: &InputFrame,
         snap: &SystemSnapshot,
-        mut emit: impl FnMut(WebCmd),
+        mut emit: impl FnMut(UiAction),
     ) {
         self.frame = self.frame.wrapping_add(1);
         self.pot_pos = inp.pot_pct;
@@ -674,7 +498,8 @@ impl UiState {
         // Single clicks are deferred ~400 ms in input.rs so this gesture
         // doesn't also fire the normal click action.
         if inp.encoder_dbl_click {
-            let on = web::toggle_wifi_radio();
+            let on = !snap.wifi_radio_on;
+            emit(UiAction::ToggleWifiRadio);
             self.toast = Some((
                 if on { "WIFI ON" } else { "WIFI OFF" },
                 self.frame + 50,
@@ -696,7 +521,7 @@ impl UiState {
                 // Breadboard row is mirrored vs. the on-screen
                 // DIST·CHRS·DLY·REV order — 3-i puts DIST on the left.
                 let fx = 3 - i;
-                self.toggle_fx(fx, snap, &mut emit);
+                self.toggle_fx(fx, snap, &mut |cmd| emit(UiAction::Command(cmd)));
                 self.toast = Some((FX_TOAST[fx][self.fx_on(snap)[fx] as usize], self.frame + 50));
             }
         }
@@ -727,15 +552,14 @@ impl UiState {
                     let count = snap.preset_count as i32;
                     let cur = snap.preset_idx.map_or(0, |i| i as i32);
                     let next = (cur + inp.encoder_delta).rem_euclid(count) as u8;
-                    usb_midi::set_program_change(next);
+                    emit(UiAction::SelectPreset(next));
                 }
 
                 // 2. Pot 0 (left, GPIO 2) & Pot 1 (second, GPIO 1) drive Macro 0 & Macro 1
                 for pot_idx in 0..2 {
                     if let Some(pct) = inp.pot_moved[pot_idx] {
                         self.home_macros[pot_idx] = pct;
-                        let cmd = snap.macro_targets[pot_idx].to_cmd(pct);
-                        emit(cmd);
+                        snap.macro_targets[pot_idx].emit_commands(pct, |cmd| emit(UiAction::Command(cmd)));
                     }
                 }
 
@@ -747,7 +571,7 @@ impl UiState {
                     let now_mono = self.mono_override.unwrap_or(snap.is_mono);
                     let new_mono = !now_mono;
                     self.mono_override = Some(new_mono);
-                    emit(WebCmd::PolyMode(!new_mono));
+                    emit(UiAction::Command(SynthCommand::PolyMode(!new_mono)));
                 }
             }
             ScreenMode::Menu { selected } => {
@@ -782,7 +606,7 @@ impl UiState {
                         if pot_idx < section.pages[page].len() {
                             self.section_vals[sec][page][pot_idx] = pct;
                             let target = section.pages[page][pot_idx].target;
-                            emit(target.to_cmd(pct));
+                            target.emit_commands(pct, |cmd| emit(UiAction::Command(cmd)));
                         }
                     }
                 }
@@ -816,7 +640,7 @@ impl UiState {
                         };
                         let new_val = new_val.clamp(0, 100) as u8;
                         self.section_vals[sec][page][cursor] = new_val;
-                        emit(target.to_cmd(new_val));
+                        target.emit_commands(new_val, |cmd| emit(UiAction::Command(cmd)));
                     } else {
                         // Move column cursor across all columns, wrapping
                         // across pages — pages may hold <4 slots (ARP pg 2).
@@ -1284,7 +1108,13 @@ fn ui_task_loop(display: &mut impl Display, inputs: &mut Option<PhysicalInputs<'
             .as_mut()
             .map_or_else(InputFrame::default, |src| src.poll());
         let snap = SystemSnapshot::collect();
-        state.step(&inp, &snap, web::push_cmd);
+        state.step(&inp, &snap, |action| match action {
+            UiAction::Command(cmd) => control::push_cmd(cmd),
+            UiAction::SelectPreset(idx) => control::set_program_change(idx),
+            UiAction::ToggleWifiRadio => {
+                web::toggle_wifi_radio();
+            }
+        });
         render(&state, &snap, &mut canvas);
         display.flush(&canvas);
         FreeRtos::delay_ms(FPS_DELAY_MS);

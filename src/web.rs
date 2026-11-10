@@ -9,9 +9,8 @@
 //! - Streams real-time synth parameters, 4 oscillators, 8-slot ModMatrix,
 //!   and preset changes over `/ws` (with `/cmd` HTTP fallback).
 
-use core::cell::UnsafeCell;
 use std::ffi::{CStr, CString};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::handle::RawHandle;
@@ -22,11 +21,7 @@ use esp_idf_svc::wifi::{
 };
 use esp_idf_sys::*;
 use log::info;
-use rinsynth_dsp::effects::DistortionType;
-use rinsynth_dsp::embedded::EmbeddedEngine;
-use rinsynth_dsp::FilterMode;
 use rinsynth_model::event::SynthEvent;
-use rinsynth_model::lfo::LfoWaveform;
 use rinsynth_model::mod_matrix::{ModDest, ModSlot, ModSource};
 use rinsynth_model::params::SynthParam;
 use rinsynth_model::presets::Preset;
@@ -34,204 +29,19 @@ use rinsynth_model::voice::PolyphonyMode;
 use std::net::UdpSocket;
 use std::sync::{Mutex, OnceLock};
 
-use crate::usb_midi;
+use rinsynth_esp32::control::{self, push_cmd, SynthCommand};
 
 const AP_SSID: &str = "rinsynth-esp32";
 const AP_IP: [u8; 4] = [192, 168, 71, 1];
 const INDEX_HTML: &str = include_str!("index.html");
-const CMD_RING_CAP: usize = 256; // power of two
-
-#[derive(Clone, Copy)]
-pub enum WebCmd {
-    Nop,
-    Param(SynthParam, f32),
-    FilterMode(u8),
-    ModWheel(f32),
-    Lfo2Rate(f32),
-    Lfo2Depth(f32),
-    Lfo2Wf(u8),
-    Env3Attack(f32),
-    Env3Decay(f32),
-    Env3Sustain(f32),
-    Env3Release(f32),
-    ModSlot(u8, ModSlot),
-    DistEnable(bool),
-    DistType(u8),
-    DistDrive(f32),
-    DistMix(f32),
-    /// User-set polyphony ceiling (1..6) — the CPU governor never exceeds it.
-    VoiceCap(u8),
-    /// Runtime A/B: render the engine at 22050 Hz (true) vs 44100 Hz (false).
-    SynthHalf(bool),
-    ChorusRate(f32),
-    ChorusDepth(f32),
-    ChorusMix(f32),
-    DelayTime(f32),
-    DelayFb(f32),
-    DelayMix(f32),
-    RevRoom(f32),
-    RevDamp(f32),
-    RevMix(f32),
-    /// Global tempo in BPM (20..300) for tempo-synced LFOs and Delay.
-    Bpm(f32),
-    Lfo1Sync(bool),
-    Lfo1Beats(f32),
-    Lfo2Sync(bool),
-    Lfo2Beats(f32),
-    DelaySync(bool),
-    DelayBeats(f32),
-    /// Voice mode: true = Poly, false = Mono (key-stack + unison).
-    PolyMode(bool),
-    /// Mono-mode unison stack size (1..6).
-    Unison(u8),
-    /// Unison pitch spread in cents (0..50).
-    UniDetune(f32),
-    /// Unison stereo spread 0..1.
-    UniSpread(f32),
-    /// Arpeggiator on/off — handled on the audio task, not inside the engine.
-    ArpOn(bool),
-    /// Arp pattern index (0=Up, 1=Down, 2=UpDown, 3=Random).
-    ArpMode(u8),
-    /// Beats per arp step (0.25 = 1/16 note).
-    ArpRate(f32),
-    /// Octave span of the arp sequence (1..=4).
-    ArpOct(u8),
-    /// Arp latch: held notes keep arpeggiating after keys release.
-    ArpHold(bool),
-}
-
-/// Shared note-division table (label, quarter-note beats) used by both the Web
-/// UI and any physical OLED/encoder UI. Includes dotted 1/8 (0.75) and dotted
-/// 1/16 (0.375) used by factory presets.
-#[allow(dead_code)]
-pub const BEAT_DIVISIONS: [(&str, f32); 10] = [
-    ("4 Bars", 16.0),
-    ("2 Bars", 8.0),
-    ("1 Bar", 4.0),
-    ("1/2", 2.0),
-    ("1/4", 1.0),
-    ("1/8D", 0.75),
-    ("1/8", 0.5),
-    ("1/16D", 0.375),
-    ("1/16", 0.25),
-    ("1/32", 0.125),
-];
-
-struct CmdRing {
-    buf: UnsafeCell<[WebCmd; CMD_RING_CAP]>,
-    head: AtomicUsize,
-    tail: AtomicUsize,
-}
-
-unsafe impl Sync for CmdRing {}
-
-impl CmdRing {
-    const fn new() -> Self {
-        Self {
-            buf: UnsafeCell::new([WebCmd::Nop; CMD_RING_CAP]),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-        }
-    }
-
-    fn push(&self, cmd: WebCmd) {
-        let h = self.head.load(Ordering::Relaxed);
-        let n = (h + 1) & (CMD_RING_CAP - 1);
-        let t = self.tail.load(Ordering::Acquire);
-        if n == t {
-            // Ring full: advance tail by 1 so the newest slider value is kept
-            self.tail
-                .store((t + 1) & (CMD_RING_CAP - 1), Ordering::Release);
-        }
-        unsafe { (*self.buf.get())[h] = cmd };
-        self.head.store(n, Ordering::Release);
-    }
-
-    fn pop(&self) -> Option<WebCmd> {
-        let t = self.tail.load(Ordering::Relaxed);
-        if t == self.head.load(Ordering::Acquire) {
-            return None;
-        }
-        let c = unsafe { (*self.buf.get())[t] };
-        self.tail
-            .store((t + 1) & (CMD_RING_CAP - 1), Ordering::Release);
-        Some(c)
-    }
-}
-
-static CMD_RING: CmdRing = CmdRing::new();
-/// Serializes multi-producer pushes into `CMD_RING` on Core 0 (HTTP/WS handler
-/// + future physical knob/encoder/button UI task) while keeping the Core 1
-/// audio consumer lock-free.
-static CMD_PUSH_LOCK: Mutex<()> = Mutex::new(());
 /// Raw httpd handle stored as usize so a background thread can queue WS work.
 static HTTPD_HANDLE: AtomicUsize = AtomicUsize::new(0);
 /// Must match `max_open_sockets` in the httpd config below.
 const MAX_HTTPD_SESSIONS: usize = 12;
 static PRESETS_LIST_JSON: OnceLock<String> = OnceLock::new();
 static PRESET_DETAILS_JSON: OnceLock<Vec<String>> = OnceLock::new();
-static PRESET_SUMMARIES: OnceLock<Vec<PresetSummary>> = OnceLock::new();
 static WIFI: Mutex<Option<EspWifi<'static>>> = Mutex::new(None);
 static SAVED_SSID: Mutex<String> = Mutex::new(String::new());
-/// UI-configured polyphony ceiling — the audio-loop governor reads this every
-/// block and clamps its adaptive cap to it.
-static USER_VOICE_CAP: AtomicUsize = AtomicUsize::new(5);
-/// Live active-voice count and demo-riff completion flag updated by Core 1
-/// for lock-free readout by the Core 0 OLED UI task.
-static ACTIVE_VOICES: AtomicUsize = AtomicUsize::new(0);
-static RIFF_DONE: AtomicBool = AtomicBool::new(false);
-/// Live arpeggiator engaged state (written by the audio task, read by UI).
-static ARP_ENABLED: AtomicBool = AtomicBool::new(false);
-/// Runtime rate toggle — the render loop reads this every block to choose
-/// between 256 direct frames (44.1 kHz) and 128 frames + Catmull-Rom 2x
-/// upsample (22.05 kHz).
-static SYNTH_HALF: AtomicBool = AtomicBool::new(false);
-/// Live BPM (f32 bits) and active preset index for lock-free readout by
-/// Web/OLED UI tasks on Core 0 (`usize::MAX` = post-riff Init+ patch).
-static CURRENT_BPM_BITS: AtomicU32 = AtomicU32::new(0x42F0_0000); // 120.0f32
-static CURRENT_PRESET_IDX: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-/// Compact, pre-extracted metadata for the OLED UI so Core 0 never parses JSON
-/// or contends with Core 1 for preset strings/macro bars.
-#[derive(Clone)]
-pub struct PresetSummary {
-    pub name: String,
-    pub category: String,
-    pub is_mono: bool,
-    /// Category-based 4 macro bar levels in 0..=100%.
-    pub macro_pct: [u8; 4],
-    /// FX stage enable state [distortion, chorus, delay, reverb] — feeds the
-    /// OLED bottom-row FX kill-switch readout.
-    pub fx_on: [bool; 4],
-}
-
-pub fn preset_summary(idx: usize) -> Option<&'static PresetSummary> {
-    PRESET_SUMMARIES.get().and_then(|v| v.get(idx))
-}
-
-pub fn preset_count() -> usize {
-    PRESET_SUMMARIES.get().map_or(0, |v| v.len())
-}
-
-pub fn active_voices() -> usize {
-    ACTIVE_VOICES.load(Ordering::Relaxed)
-}
-
-pub fn set_active_voices(n: usize) {
-    ACTIVE_VOICES.store(n, Ordering::Relaxed);
-}
-
-pub fn riff_done() -> bool {
-    RIFF_DONE.load(Ordering::Relaxed)
-}
-
-pub fn arp_enabled() -> bool {
-    ARP_ENABLED.load(Ordering::Relaxed)
-}
-
-pub fn set_arp_enabled(on: bool) {
-    ARP_ENABLED.store(on, Ordering::Relaxed);
-}
 
 /// Wi-Fi radio on/off state for the rotary double-click RF-EMI A/B test.
 /// Independent of the WS `wstop` bounce — this one STAYS off until the
@@ -260,46 +70,6 @@ pub fn toggle_wifi_radio() -> bool {
             }
         });
     on
-}
-
-pub fn set_riff_done(done: bool) {
-    RIFF_DONE.store(done, Ordering::Relaxed);
-}
-
-pub fn user_voice_cap() -> usize {
-    USER_VOICE_CAP.load(Ordering::Relaxed).clamp(1, 6)
-}
-
-pub fn synth_half() -> bool {
-    SYNTH_HALF.load(Ordering::Relaxed)
-}
-
-#[allow(dead_code)]
-pub fn current_bpm() -> f32 {
-    f32::from_bits(CURRENT_BPM_BITS.load(Ordering::Relaxed))
-}
-
-pub fn set_current_bpm(bpm: f32) {
-    CURRENT_BPM_BITS.store(bpm.clamp(20.0, 300.0).to_bits(), Ordering::Relaxed);
-}
-
-#[allow(dead_code)]
-pub fn current_preset_index() -> usize {
-    CURRENT_PRESET_IDX.load(Ordering::Relaxed)
-}
-
-pub fn set_current_preset_index(idx: usize) {
-    CURRENT_PRESET_IDX.store(idx, Ordering::Relaxed);
-}
-
-/// Enqueue a `WebCmd` from any Core 0 producer (Web UI or physical hardware UI).
-pub fn push_cmd(cmd: WebCmd) {
-    let _g = CMD_PUSH_LOCK.lock();
-    CMD_RING.push(cmd);
-}
-
-pub fn pop_cmd() -> Option<WebCmd> {
-    CMD_RING.pop()
 }
 
 const MOD_SOURCES: [ModSource; 15] = [
@@ -347,100 +117,6 @@ fn src_to_idx(s: ModSource) -> usize {
 
 fn dst_to_idx(d: ModDest) -> usize {
     MOD_DESTS.iter().position(|&x| x == d).unwrap_or(0)
-}
-
-pub fn apply_cmd(vm: &mut EmbeddedEngine, cmd: WebCmd) {
-    match cmd {
-        WebCmd::Nop => {}
-        WebCmd::Param(p, v) => vm.set_param(p, v),
-        WebCmd::FilterMode(m) => {
-            let mode = match m {
-                1 => FilterMode::HighPass,
-                2 => FilterMode::BandPass,
-                3 => FilterMode::Notch,
-                _ => FilterMode::LowPass,
-            };
-            vm.set_filter_mode(mode);
-        }
-        WebCmd::ModWheel(v) => vm.set_mod_wheel(v),
-        WebCmd::Lfo2Rate(v) => vm.set_lfo2_rate(v),
-        WebCmd::Lfo2Depth(v) => vm.set_lfo2_depth(v),
-        WebCmd::Lfo2Wf(w) => {
-            let wf = match w {
-                0 => LfoWaveform::Sine,
-                1 => LfoWaveform::Triangle,
-                2 => LfoWaveform::Square,
-                3 => LfoWaveform::Saw,
-                _ => LfoWaveform::Random,
-            };
-            vm.set_lfo2_waveform(wf);
-        }
-        WebCmd::Env3Attack(v) => vm.set_env3_attack(v),
-        WebCmd::Env3Decay(v) => vm.set_env3_decay(v),
-        WebCmd::Env3Sustain(v) => vm.set_env3_sustain(v),
-        WebCmd::Env3Release(v) => vm.set_env3_release(v),
-        WebCmd::ModSlot(idx, slot) => vm.set_mod_slot(idx as usize, slot),
-        WebCmd::DistEnable(on) => vm.effects.set_distortion_enabled(on),
-        WebCmd::DistType(t) => {
-            vm.effects.set_distortion_type(DistortionType::from_index(t));
-        }
-        WebCmd::DistDrive(v) => vm.effects.set_distortion_drive(v),
-        WebCmd::DistMix(v) => {
-            // Mix>0 implicitly enables, matching the other FX convention.
-            if v > 0.001 {
-                vm.effects.set_distortion_enabled(true);
-            }
-            vm.effects.set_distortion_mix(v);
-        }
-        WebCmd::VoiceCap(n) => USER_VOICE_CAP.store(n as usize, Ordering::Relaxed),
-        WebCmd::SynthHalf(on) => {
-            SYNTH_HALF.store(on, Ordering::Relaxed);
-            vm.set_sample_rate(if on { 22_050 } else { 44_100 });
-        }
-        WebCmd::ChorusRate(v) => vm.effects.set_chorus_rate(v),
-        WebCmd::ChorusDepth(v) => vm.effects.set_chorus_depth(v),
-        WebCmd::ChorusMix(v) => {
-            vm.effects.set_chorus_enabled(v > 0.001);
-            vm.effects.set_chorus_mix(v);
-        }
-        WebCmd::DelayTime(v) => vm.effects.set_delay_time(v),
-        WebCmd::DelayFb(v) => vm.effects.set_delay_feedback(v),
-        WebCmd::DelayMix(v) => {
-            vm.effects.set_delay_enabled(v > 0.001);
-            vm.effects.set_delay_mix(v);
-        }
-        WebCmd::RevRoom(v) => vm.effects.set_reverb_room_size(v),
-        WebCmd::RevDamp(v) => vm.effects.set_reverb_damping(v),
-        WebCmd::RevMix(v) => {
-            vm.effects.set_reverb_enabled(v > 0.001);
-            vm.effects.set_reverb_mix(v);
-        }
-        WebCmd::Bpm(v) => {
-            vm.set_bpm(v);
-            set_current_bpm(vm.bpm());
-        }
-        WebCmd::Lfo1Sync(on) => vm.set_lfo1_sync_enabled(on),
-        WebCmd::Lfo1Beats(b) => vm.set_lfo1_beats(b),
-        WebCmd::Lfo2Sync(on) => vm.set_lfo2_sync_enabled(on),
-        WebCmd::Lfo2Beats(b) => vm.set_lfo2_beats(b),
-        WebCmd::DelaySync(on) => vm.set_delay_sync(on),
-        WebCmd::DelayBeats(b) => vm.set_delay_beats(b),
-        WebCmd::PolyMode(poly) => vm.set_polyphony_mode(if poly {
-            PolyphonyMode::Poly
-        } else {
-            PolyphonyMode::Mono
-        }),
-        WebCmd::Unison(n) => vm.set_unison_count(n as usize),
-        WebCmd::UniDetune(c) => vm.set_unison_detune(c),
-        WebCmd::UniSpread(s) => vm.set_unison_spread(s),
-        // Arp commands are consumed by the audio-task scheduler before
-        // they ever reach apply_cmd — kept here for exhaustiveness.
-        WebCmd::ArpOn(_)
-        | WebCmd::ArpMode(_)
-        | WebCmd::ArpRate(_)
-        | WebCmd::ArpOct(_)
-        | WebCmd::ArpHold(_) => {}
-    }
 }
 
 fn preset_to_ui_json(p: &Preset) -> String {
@@ -599,93 +275,93 @@ fn handle_query_one(q: &str) {
             dest: *MOD_DESTS.get(slot_dst).unwrap_or(&ModDest::Off),
             amount: slot_amt.clamp(-1.0, 1.0),
         };
-        push_cmd(WebCmd::ModSlot(slot_idx, slot));
+        push_cmd(SynthCommand::ModSlot(slot_idx, slot));
         return;
     }
     let Ok(v) = val.parse::<f32>() else { return };
     match key {
-        "on" => usb_midi::push_event(SynthEvent::note_on_midi(v as u8, 108)),
-        "off" => usb_midi::push_event(SynthEvent::note_off(v as u8)),
-        "o1w" => push_cmd(WebCmd::Param(SynthParam::Osc1Waveform, v)),
-        "o2w" => push_cmd(WebCmd::Param(SynthParam::Osc2Waveform, v)),
-        "o3w" => push_cmd(WebCmd::Param(SynthParam::Osc3Waveform, v)),
-        "o4w" => push_cmd(WebCmd::Param(SynthParam::Osc4Waveform, v)),
-        "o1l" => push_cmd(WebCmd::Param(SynthParam::Osc1Level, v)),
-        "o2l" => push_cmd(WebCmd::Param(SynthParam::Osc2Level, v)),
-        "o3l" => push_cmd(WebCmd::Param(SynthParam::Osc3Level, v)),
-        "o4l" => push_cmd(WebCmd::Param(SynthParam::Osc4Level, v)),
-        "o1pw" => push_cmd(WebCmd::Param(SynthParam::Osc1Pw, v)),
-        "o2pw" => push_cmd(WebCmd::Param(SynthParam::Osc2Pw, v)),
-        "o3pw" => push_cmd(WebCmd::Param(SynthParam::Osc3Pw, v)),
-        "o4pw" => push_cmd(WebCmd::Param(SynthParam::Osc4Pw, v)),
-        "o2s" => push_cmd(WebCmd::Param(SynthParam::Osc2Semitones, v)),
-        "o2c" => push_cmd(WebCmd::Param(SynthParam::Osc2Cents, v)),
-        "o3s" => push_cmd(WebCmd::Param(SynthParam::Osc3Semitones, v)),
-        "o3c" => push_cmd(WebCmd::Param(SynthParam::Osc3Cents, v)),
-        "o4s" => push_cmd(WebCmd::Param(SynthParam::Osc4Semitones, v)),
-        "o4c" => push_cmd(WebCmd::Param(SynthParam::Osc4Cents, v)),
-        "o1pn" => push_cmd(WebCmd::Param(SynthParam::Osc1Pan, v)),
-        "o2pn" => push_cmd(WebCmd::Param(SynthParam::Osc2Pan, v)),
-        "o3pn" => push_cmd(WebCmd::Param(SynthParam::Osc3Pan, v)),
-        "o4pn" => push_cmd(WebCmd::Param(SynthParam::Osc4Pan, v)),
-        "fmode" => push_cmd(WebCmd::FilterMode(v as u8)),
-        "cut" => push_cmd(WebCmd::Param(SynthParam::FilterCutoff, v)),
-        "res" => push_cmd(WebCmd::Param(SynthParam::FilterResonance, v)),
-        "fenv" => push_cmd(WebCmd::Param(SynthParam::FilterEnvAmount, v)),
-        "fatk" => push_cmd(WebCmd::Param(SynthParam::FilterAttack, v)),
-        "fdec" => push_cmd(WebCmd::Param(SynthParam::FilterDecay, v)),
-        "fsus" => push_cmd(WebCmd::Param(SynthParam::FilterSustain, v)),
-        "frel" => push_cmd(WebCmd::Param(SynthParam::FilterRelease, v)),
-        "wth" => push_cmd(WebCmd::Param(SynthParam::StereoWidth, v)),
-        "atk" => push_cmd(WebCmd::Param(SynthParam::Attack, v)),
-        "dec" => push_cmd(WebCmd::Param(SynthParam::Decay, v)),
-        "sus" => push_cmd(WebCmd::Param(SynthParam::Sustain, v)),
-        "rel" => push_cmd(WebCmd::Param(SynthParam::Release, v)),
-        "prt" => push_cmd(WebCmd::Param(SynthParam::PortamentoTime, v)),
-        "e3a" => push_cmd(WebCmd::Env3Attack(v)),
-        "e3d" => push_cmd(WebCmd::Env3Decay(v)),
-        "e3s" => push_cmd(WebCmd::Env3Sustain(v)),
-        "e3r" => push_cmd(WebCmd::Env3Release(v)),
-        "mw" => push_cmd(WebCmd::ModWheel(v)),
-        "ldst" => push_cmd(WebCmd::Param(SynthParam::LfoDestination, v)),
-        "lwf" => push_cmd(WebCmd::Param(SynthParam::LfoWaveform, v)),
-        "lrt" => push_cmd(WebCmd::Param(SynthParam::LfoRate, v)),
-        "ldep" => push_cmd(WebCmd::Param(SynthParam::LfoDepth, v)),
-        "l2wf" => push_cmd(WebCmd::Lfo2Wf(v as u8)),
-        "l2rt" => push_cmd(WebCmd::Lfo2Rate(v)),
-        "l2dep" => push_cmd(WebCmd::Lfo2Depth(v)),
-        "bpm" => push_cmd(WebCmd::Bpm(v)),
-        "l1_s" => push_cmd(WebCmd::Lfo1Sync(v != 0.0)),
-        "l1_b" => push_cmd(WebCmd::Lfo1Beats(v)),
-        "l2_s" => push_cmd(WebCmd::Lfo2Sync(v != 0.0)),
-        "l2_b" => push_cmd(WebCmd::Lfo2Beats(v)),
-        "dl_s" => push_cmd(WebCmd::DelaySync(v != 0.0)),
-        "dl_b" => push_cmd(WebCmd::DelayBeats(v)),
-        "dt_e" => push_cmd(WebCmd::DistEnable(v != 0.0)),
-        "dt_t" => push_cmd(WebCmd::DistType(v as u8)),
-        "dt_d" => push_cmd(WebCmd::DistDrive(v)),
-        "dt_m" => push_cmd(WebCmd::DistMix(v)),
-        "ch_r" => push_cmd(WebCmd::ChorusRate(v)),
-        "ch_d" => push_cmd(WebCmd::ChorusDepth(v)),
-        "ch_m" => push_cmd(WebCmd::ChorusMix(v)),
-        "dl_t" => push_cmd(WebCmd::DelayTime(v)),
-        "dl_fb" => push_cmd(WebCmd::DelayFb(v)),
-        "dl_m" => push_cmd(WebCmd::DelayMix(v)),
-        "ar_e" => push_cmd(WebCmd::ArpOn(v != 0.0)),
-        "ar_m" => push_cmd(WebCmd::ArpMode(v as u8)),
-        "ar_r" => push_cmd(WebCmd::ArpRate(v)),
-        "ar_o" => push_cmd(WebCmd::ArpOct(v as u8)),
-        "ar_h" => push_cmd(WebCmd::ArpHold(v != 0.0)),
-        "rv_r" => push_cmd(WebCmd::RevRoom(v)),
-        "rv_d" => push_cmd(WebCmd::RevDamp(v)),
-        "rv_m" => push_cmd(WebCmd::RevMix(v)),
-        "vol" => push_cmd(WebCmd::Param(SynthParam::MasterVolume, v)),
-        "poly" => push_cmd(WebCmd::PolyMode(v != 0.0)),
-        "uni" => push_cmd(WebCmd::Unison(v as u8)),
-        "udet" => push_cmd(WebCmd::UniDetune(v)),
-        "uspr" => push_cmd(WebCmd::UniSpread(v)),
-        "pcap" => push_cmd(WebCmd::VoiceCap(v as u8)),
-        "srate" => push_cmd(WebCmd::SynthHalf(v != 0.0)),
+        "on" => control::push_event(SynthEvent::note_on_midi(v as u8, 108)),
+        "off" => control::push_event(SynthEvent::note_off(v as u8)),
+        "o1w" => push_cmd(SynthCommand::Param(SynthParam::Osc1Waveform, v)),
+        "o2w" => push_cmd(SynthCommand::Param(SynthParam::Osc2Waveform, v)),
+        "o3w" => push_cmd(SynthCommand::Param(SynthParam::Osc3Waveform, v)),
+        "o4w" => push_cmd(SynthCommand::Param(SynthParam::Osc4Waveform, v)),
+        "o1l" => push_cmd(SynthCommand::Param(SynthParam::Osc1Level, v)),
+        "o2l" => push_cmd(SynthCommand::Param(SynthParam::Osc2Level, v)),
+        "o3l" => push_cmd(SynthCommand::Param(SynthParam::Osc3Level, v)),
+        "o4l" => push_cmd(SynthCommand::Param(SynthParam::Osc4Level, v)),
+        "o1pw" => push_cmd(SynthCommand::Param(SynthParam::Osc1Pw, v)),
+        "o2pw" => push_cmd(SynthCommand::Param(SynthParam::Osc2Pw, v)),
+        "o3pw" => push_cmd(SynthCommand::Param(SynthParam::Osc3Pw, v)),
+        "o4pw" => push_cmd(SynthCommand::Param(SynthParam::Osc4Pw, v)),
+        "o2s" => push_cmd(SynthCommand::Param(SynthParam::Osc2Semitones, v)),
+        "o2c" => push_cmd(SynthCommand::Param(SynthParam::Osc2Cents, v)),
+        "o3s" => push_cmd(SynthCommand::Param(SynthParam::Osc3Semitones, v)),
+        "o3c" => push_cmd(SynthCommand::Param(SynthParam::Osc3Cents, v)),
+        "o4s" => push_cmd(SynthCommand::Param(SynthParam::Osc4Semitones, v)),
+        "o4c" => push_cmd(SynthCommand::Param(SynthParam::Osc4Cents, v)),
+        "o1pn" => push_cmd(SynthCommand::Param(SynthParam::Osc1Pan, v)),
+        "o2pn" => push_cmd(SynthCommand::Param(SynthParam::Osc2Pan, v)),
+        "o3pn" => push_cmd(SynthCommand::Param(SynthParam::Osc3Pan, v)),
+        "o4pn" => push_cmd(SynthCommand::Param(SynthParam::Osc4Pan, v)),
+        "fmode" => push_cmd(SynthCommand::FilterMode(v as u8)),
+        "cut" => push_cmd(SynthCommand::Param(SynthParam::FilterCutoff, v)),
+        "res" => push_cmd(SynthCommand::Param(SynthParam::FilterResonance, v)),
+        "fenv" => push_cmd(SynthCommand::Param(SynthParam::FilterEnvAmount, v)),
+        "fatk" => push_cmd(SynthCommand::Param(SynthParam::FilterAttack, v)),
+        "fdec" => push_cmd(SynthCommand::Param(SynthParam::FilterDecay, v)),
+        "fsus" => push_cmd(SynthCommand::Param(SynthParam::FilterSustain, v)),
+        "frel" => push_cmd(SynthCommand::Param(SynthParam::FilterRelease, v)),
+        "wth" => push_cmd(SynthCommand::Param(SynthParam::StereoWidth, v)),
+        "atk" => push_cmd(SynthCommand::Param(SynthParam::Attack, v)),
+        "dec" => push_cmd(SynthCommand::Param(SynthParam::Decay, v)),
+        "sus" => push_cmd(SynthCommand::Param(SynthParam::Sustain, v)),
+        "rel" => push_cmd(SynthCommand::Param(SynthParam::Release, v)),
+        "prt" => push_cmd(SynthCommand::Param(SynthParam::PortamentoTime, v)),
+        "e3a" => push_cmd(SynthCommand::Env3Attack(v)),
+        "e3d" => push_cmd(SynthCommand::Env3Decay(v)),
+        "e3s" => push_cmd(SynthCommand::Env3Sustain(v)),
+        "e3r" => push_cmd(SynthCommand::Env3Release(v)),
+        "mw" => push_cmd(SynthCommand::ModWheel(v)),
+        "ldst" => push_cmd(SynthCommand::Param(SynthParam::LfoDestination, v)),
+        "lwf" => push_cmd(SynthCommand::Param(SynthParam::LfoWaveform, v)),
+        "lrt" => push_cmd(SynthCommand::Param(SynthParam::LfoRate, v)),
+        "ldep" => push_cmd(SynthCommand::Param(SynthParam::LfoDepth, v)),
+        "l2wf" => push_cmd(SynthCommand::Lfo2Wf(v as u8)),
+        "l2rt" => push_cmd(SynthCommand::Lfo2Rate(v)),
+        "l2dep" => push_cmd(SynthCommand::Lfo2Depth(v)),
+        "bpm" => push_cmd(SynthCommand::Bpm(v)),
+        "l1_s" => push_cmd(SynthCommand::Lfo1Sync(v != 0.0)),
+        "l1_b" => push_cmd(SynthCommand::Lfo1Beats(v)),
+        "l2_s" => push_cmd(SynthCommand::Lfo2Sync(v != 0.0)),
+        "l2_b" => push_cmd(SynthCommand::Lfo2Beats(v)),
+        "dl_s" => push_cmd(SynthCommand::DelaySync(v != 0.0)),
+        "dl_b" => push_cmd(SynthCommand::DelayBeats(v)),
+        "dt_e" => push_cmd(SynthCommand::DistEnable(v != 0.0)),
+        "dt_t" => push_cmd(SynthCommand::DistType(v as u8)),
+        "dt_d" => push_cmd(SynthCommand::DistDrive(v)),
+        "dt_m" => push_cmd(SynthCommand::DistMix(v)),
+        "ch_r" => push_cmd(SynthCommand::ChorusRate(v)),
+        "ch_d" => push_cmd(SynthCommand::ChorusDepth(v)),
+        "ch_m" => push_cmd(SynthCommand::ChorusMix(v)),
+        "dl_t" => push_cmd(SynthCommand::DelayTime(v)),
+        "dl_fb" => push_cmd(SynthCommand::DelayFb(v)),
+        "dl_m" => push_cmd(SynthCommand::DelayMix(v)),
+        "ar_e" => push_cmd(SynthCommand::ArpOn(v != 0.0)),
+        "ar_m" => push_cmd(SynthCommand::ArpMode(v as u8)),
+        "ar_r" => push_cmd(SynthCommand::ArpRate(v)),
+        "ar_o" => push_cmd(SynthCommand::ArpOct(v as u8)),
+        "ar_h" => push_cmd(SynthCommand::ArpHold(v != 0.0)),
+        "rv_r" => push_cmd(SynthCommand::RevRoom(v)),
+        "rv_d" => push_cmd(SynthCommand::RevDamp(v)),
+        "rv_m" => push_cmd(SynthCommand::RevMix(v)),
+        "vol" => push_cmd(SynthCommand::Param(SynthParam::MasterVolume, v)),
+        "poly" => push_cmd(SynthCommand::PolyMode(v != 0.0)),
+        "uni" => push_cmd(SynthCommand::Unison(v as u8)),
+        "udet" => push_cmd(SynthCommand::UniDetune(v)),
+        "uspr" => push_cmd(SynthCommand::UniSpread(v)),
+        "pcap" => push_cmd(SynthCommand::VoiceCap(v as u8)),
+        "srate" => push_cmd(SynthCommand::SynthHalf(v != 0.0)),
         "wstop" => {
             // RF-interference diagnostic: bounce the radio for N seconds —
             // if the periodic click in the audio path vanishes while the
@@ -955,7 +631,7 @@ unsafe extern "C" fn preset_get(req: *mut httpd_req_t) -> esp_err_t {
         .and_then(|(_, s)| s.split('&').next())
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
-    usb_midi::set_program_change(idx as u8);
+    control::set_program_change(idx as u8);
     let body = PRESET_DETAILS_JSON
         .get()
         .and_then(|v| v.get(idx))
@@ -1113,7 +789,7 @@ unsafe extern "C" fn ws_get(req: *mut httpd_req_t) -> esp_err_t {
                     let _ = httpd_ws_send_frame(req, &mut out);
                 } else if let Some(rest) = msg.strip_prefix("preset:") {
                     let idx = rest.trim().parse::<usize>().unwrap_or(0);
-                    usb_midi::set_program_change(idx as u8);
+                    control::set_program_change(idx as u8);
                     if let Some(body) = PRESET_DETAILS_JSON.get().and_then(|v| v.get(idx)) {
                         let mut out: httpd_ws_frame_t = core::mem::zeroed();
                         out.final_ = true;
@@ -1132,44 +808,11 @@ unsafe extern "C" fn ws_get(req: *mut httpd_req_t) -> esp_err_t {
     ESP_OK
 }
 
-fn macro_bars_for(p: &Preset) -> [u8; 4] {
-    let pct = |x: f32| (x.clamp(0.0, 1.0) * 100.0) as u8;
-    let cut = (((p.filter_cutoff.clamp(20.0, 20_000.0) / 20.0).ln()
-        / (20_000.0f32 / 20.0).ln())
-        * 100.0)
-        .clamp(0.0, 100.0) as u8;
-    let res = pct(p.filter_resonance);
-    let fenv = pct((p.filter_env_amount + 1.0) * 0.5);
-    match p.category.as_str() {
-        "Bass" => [cut, res, fenv, pct(p.filter_decay / 2.0)],
-        "Lead" => [cut, res, pct(p.portamento_time / 0.5), fenv],
-        "Pad" => [
-            pct(p.amp_attack / 2.0),
-            cut,
-            pct(if p.reverb_enabled { p.reverb_mix } else { 0.0 }),
-            pct(if p.chorus_enabled { p.chorus_mix } else { 0.0 }),
-        ],
-        "Keys" => [
-            cut,
-            pct(p.amp_decay / 2.0),
-            pct(p.amp_release / 2.0),
-            pct(if p.reverb_enabled { p.reverb_mix } else { 0.0 }),
-        ],
-        _ => [
-            cut,
-            res,
-            pct(if p.delay_enabled { p.delay_mix } else { 0.0 }),
-            pct(if p.reverb_enabled { p.reverb_mix } else { 0.0 }),
-        ],
-    }
-}
-
 /// Pre-build preset directory & per-preset UI JSON in PSRAM.
 pub fn init_presets_json(bank: &[Preset]) {
     let mut list_json = String::with_capacity(4096);
     list_json.push('[');
     let mut details = Vec::with_capacity(bank.len());
-    let mut summaries = Vec::with_capacity(bank.len());
     for (i, p) in bank.iter().enumerate() {
         if i > 0 {
             list_json.push(',');
@@ -1179,23 +822,10 @@ pub fn init_presets_json(bank: &[Preset]) {
             i, p.name, p.category
         ));
         details.push(preset_to_ui_json(p));
-        summaries.push(PresetSummary {
-            name: p.name.clone(),
-            category: p.category.clone(),
-            is_mono: p.polyphony_mode == PolyphonyMode::Mono,
-            macro_pct: macro_bars_for(p),
-            fx_on: [
-                p.distortion_enabled,
-                p.chorus_enabled,
-                p.delay_enabled,
-                p.reverb_enabled,
-            ],
-        });
     }
     list_json.push(']');
     let _ = PRESETS_LIST_JSON.set(list_json);
     let _ = PRESET_DETAILS_JSON.set(details);
-    let _ = PRESET_SUMMARIES.set(summaries);
 }
 
 /// Start the SoftAP (+ optional STA) + Captive DNS + HTTP/WS server on Core 0.

@@ -39,7 +39,7 @@ pub struct InputFrame {
     /// True on the frame a hold crosses 500 ms (acts as BACK / mode toggle).
     pub encoder_long_press: bool,
     /// Debounced FX kill-button presses, edge-triggered once per actuation.
-    /// Index order = physical left→right = [DIST(41), CHRS(42), DLY(2), REV(1)].
+    /// Raw GPIO order [41, 42, 2, 1]; the UI reverses this for the mirrored mounting.
     pub button_press: [bool; 4],
     /// Current physical pot positions in 0..=100% — no pots wired (GPIO 1/2
     /// host the FX buttons); kept at 0 for future re-wire on new pins.
@@ -93,8 +93,8 @@ pub struct PhysicalInputs<'d> {
     /// being dispatched as `encoder_click` (cancelled by a 2nd click).
     pending_click: bool,
     pending_click_ms: u32,
-    /// FX kill buttons in physical left→right order = FX index order
-    /// [DIST, CHRS, DLY, REV] on GPIO 41, 42, 2, 1.
+    /// Raw FX button inputs on GPIO 41, 42, 2, 1. Logical FX assignment
+    /// belongs to the UI; it currently reverses these indices.
     buttons: [FxButton; 4],
 }
 
