@@ -35,9 +35,17 @@ fn main() -> anyhow::Result<()> {
     // until the web server is up, then dim green.
     status::init(p.pins.gpio48);
 
+    // FX buttons 3/4: breadboard prototype keeps GPIO 2/1; the `devboard`
+    // feature (cargo build --features devboard) moves them to GPIO 15/16
+    // so ADC1 CH0/1 (GPIO 1/2) can host the board's pots. See Cargo.toml.
+    #[cfg(feature = "devboard")]
+    let (fx_btn2, fx_btn3) = (p.pins.gpio15, p.pins.gpio16);
+    #[cfg(not(feature = "devboard"))]
+    let (fx_btn2, fx_btn3) = (p.pins.gpio2, p.pins.gpio1);
+
     // 1.3" SPI OLED (SH1106/SSD1306): CLK=GPIO9, MOSI=GPIO10, RES=GPIO11,
-    // DC=GPIO12, CS=GPIO13 + FX buttons=GPIO41/42/2/1 + Encoder=GPIO38/39/40.
-    // Starts the animated SPLASH screen immediately on Core 0.
+    // DC=GPIO12, CS=GPIO13 + FX buttons=GPIO41/42 + btn2/btn3 +
+    // Encoder=GPIO38/39/40. Starts the animated SPLASH screen on Core 0.
     ui::init(
         p.spi2,
         p.pins.gpio9,
@@ -47,8 +55,8 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio13,
         p.pins.gpio41,
         p.pins.gpio42,
-        p.pins.gpio2,
-        p.pins.gpio1,
+        fx_btn2,
+        fx_btn3,
         p.pins.gpio38,
         p.pins.gpio39,
         p.pins.gpio40,

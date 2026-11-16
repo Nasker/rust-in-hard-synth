@@ -16,7 +16,9 @@ use crate::usb_midi;
 use crate::web;
 use rinsynth_esp32::control::{self, SynthCommand};
 use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, OutputPin};
+use esp_idf_hal::gpio::{
+    Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, InputPin, OutputPin,
+};
 use esp_idf_hal::spi::SpiAnyPins;
 use log::{info, warn};
 use rinsynth_esp32::ui_parameters::ParamTarget;
@@ -1122,8 +1124,8 @@ fn ui_task_loop(display: &mut impl Display, inputs: &mut Option<PhysicalInputs<'
 }
 
 /// Initialize the 1.3" SPI OLED (`GPIO 9..13`), FX kill buttons
-/// (`GPIO 41`, `42`, `2`, `1`), and PCNT rotary encoder (`GPIO 38..40`),
-/// then spawn the Core 0 UI task.
+/// (`GPIO 41`, `42` + target-selected `btn2`/`btn3`), and PCNT rotary
+/// encoder (`GPIO 38..40`), then spawn the Core 0 UI task.
 #[allow(clippy::too_many_arguments)]
 pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     spi: SPI,
@@ -1134,8 +1136,8 @@ pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     cs: CS,
     btn0_gpio41: Gpio41<'static>,
     btn1_gpio42: Gpio42<'static>,
-    btn2_gpio2: Gpio2<'static>,
-    btn3_gpio1: Gpio1<'static>,
+    btn2: impl InputPin + Send + 'static,
+    btn3: impl InputPin + Send + 'static,
     enc_clk_gpio38: Gpio38<'static>,
     enc_dt_gpio39: Gpio39<'static>,
     enc_sw_gpio40: Gpio40<'static>,
@@ -1150,8 +1152,8 @@ pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     let mut inputs = match PhysicalInputs::new(
         btn0_gpio41,
         btn1_gpio42,
-        btn2_gpio2,
-        btn3_gpio1,
+        btn2,
+        btn3,
         enc_clk_gpio38,
         enc_dt_gpio39,
         enc_sw_gpio40,

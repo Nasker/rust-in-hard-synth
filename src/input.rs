@@ -1,18 +1,21 @@
 //! Physical input drivers: PCNT quadrature rotary encoder + switch (GPIO 38/39/40)
-//! and four FX kill buttons (GPIO 41, 42, 2, 1 — active-low, wired to GND).
+//! and four FX kill buttons (active-low, wired to GND).
 //!
 //! Single responsibility: turn raw hardware signals into debounced, jitter-free
 //! [`InputFrame`] snapshots at the UI frame rate (~25 Hz).
 //!
-//! Confirmed wiring:
-//! - FX buttons (L→R):         `GPIO 41`, `GPIO 42`, `GPIO 2`, `GPIO 1`
-//!   (to GND, internal pull-ups; displaced the never-enabled pots on 1/2)
+//! Confirmed wiring — buttons 3/4 differ per target, selected in main.rs:
+//! - FX buttons (L→R), breadboard: `GPIO 41`, `GPIO 42`, `GPIO 2`, `GPIO 1`
+//! - FX buttons (L→R), `devboard` feature: `GPIO 41`, `GPIO 42`, `GPIO 15`, `GPIO 16`
+//!   (moved off 2/1 to free ADC1 CH0/1 for the board's pots)
 //! - Rotary Encoder CLK:       `GPIO 38`
 //! - Rotary Encoder DT:        `GPIO 39`
 //! - Rotary Encoder Switch:    `GPIO 40` (active-low with internal pull-up)
 
 use core::time::Duration;
-use esp_idf_hal::gpio::{Gpio1, Gpio2, Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, Input, PinDriver, Pull};
+use esp_idf_hal::gpio::{
+    Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, Input, InputPin, PinDriver, Pull,
+};
 use esp_idf_hal::pcnt::config::{
     ChannelConfig, ChannelEdgeAction, ChannelLevelAction, GlitchFilterConfig, UnitConfig,
 };
@@ -39,10 +42,11 @@ pub struct InputFrame {
     /// True on the frame a hold crosses 500 ms (acts as BACK / mode toggle).
     pub encoder_long_press: bool,
     /// Debounced FX kill-button presses, edge-triggered once per actuation.
-    /// Raw GPIO order [41, 42, 2, 1]; the UI reverses this for the mirrored mounting.
+    /// Raw GPIO order [41, 42, btn2, btn3] (btn2/3 = 2/1 breadboard, 15/16 dev
+    /// board); the UI reverses this for the mirrored mounting.
     pub button_press: [bool; 4],
-    /// Current physical pot positions in 0..=100% — no pots wired (GPIO 1/2
-    /// host the FX buttons); kept at 0 for future re-wire on new pins.
+    /// Current physical pot positions in 0..=100% — ADC read path not yet
+    /// implemented; board wires 4 pots to ADC1 GPIO 1/2/3/8 (CH0/1/2/7).
     pub pot_pct: [u8; 2],
     /// `Some(new_pct)` when a pot intentionally moved outside the deadband this frame.
     pub pot_moved: [Option<u8>; 2],
@@ -75,8 +79,9 @@ const LONG_PRESS_MS: u32 = 480;
 /// doesn't also trigger the normal click action.
 const DBL_CLICK_MS: u32 = 400;
 
-/// No potentiometers are wired — GPIO 1/2 now host FX kill buttons. Keep
-/// false: restoring pots needs NEW pins plus the ADC path (see git history).
+/// No potentiometers are read yet — the dev board wires 4 pots to ADC1
+/// GPIO 1/2/3/8 (CH0/1/2/7) but the ADC path is still unimplemented. Keep
+/// false until it lands (see git history).
 pub const POTS_ENABLED: bool = false;
 
 /// Hardware input bundle: PCNT encoder + switch + the four FX kill buttons.
@@ -93,8 +98,9 @@ pub struct PhysicalInputs<'d> {
     /// being dispatched as `encoder_click` (cancelled by a 2nd click).
     pending_click: bool,
     pending_click_ms: u32,
-    /// Raw FX button inputs on GPIO 41, 42, 2, 1. Logical FX assignment
-    /// belongs to the UI; it currently reverses these indices.
+    /// Raw FX button inputs (GPIO 41, 42 + target-selected btn2/btn3).
+    /// Logical FX assignment belongs to the UI; it currently reverses
+    /// these indices.
     buttons: [FxButton; 4],
 }
 
@@ -106,8 +112,8 @@ impl PhysicalInputs<'static> {
     pub fn new(
         btn0_gpio41: Gpio41<'static>,
         btn1_gpio42: Gpio42<'static>,
-        btn2_gpio2: Gpio2<'static>,
-        btn3_gpio1: Gpio1<'static>,
+        btn2: impl InputPin + 'static,
+        btn3: impl InputPin + 'static,
         enc_clk_gpio38: Gpio38<'static>,
         enc_dt_gpio39: Gpio39<'static>,
         enc_sw_gpio40: Gpio40<'static>,
@@ -143,8 +149,10 @@ impl PhysicalInputs<'static> {
         // 2. Encoder push-switch on GPIO 40 (active-low, internal pull-up)
         let sw = PinDriver::input(enc_sw_gpio40, Pull::Up)?;
 
-        // 3. FX kill buttons on GPIO 41, 42, 2, 1 (active-low, internal
+        // 3. FX kill buttons on GPIO 41, 42 + btn2/btn3 (active-low, internal
         //    pull-ups) — physical left→right = FX index [DIST,CHRS,DLY,REV].
+        //    btn2/btn3 are GPIO 2/1 on the breadboard and GPIO 15/16 with the
+        //    `devboard` feature; selected at the call site in main.rs.
         fn mk_btn<P: esp_idf_hal::gpio::InputPin + 'static>(pin: P) -> Result<FxButton, EspError> {
             Ok(FxButton {
                 pin: PinDriver::input(pin, Pull::Up)?,
@@ -155,8 +163,8 @@ impl PhysicalInputs<'static> {
         let buttons = [
             mk_btn(btn0_gpio41)?,
             mk_btn(btn1_gpio42)?,
-            mk_btn(btn2_gpio2)?,
-            mk_btn(btn3_gpio1)?,
+            mk_btn(btn2)?,
+            mk_btn(btn3)?,
         ];
 
         let this = Self {
@@ -172,7 +180,7 @@ impl PhysicalInputs<'static> {
             pending_click_ms: 0,
             buttons,
         };
-        info!("input: ready — Encoder(GPIO38/39/40) FXBtns(GPIO41/42/2/1)");
+        info!("input: ready — Encoder(GPIO38/39/40) FXBtns(41/42 + btn2/btn3)");
         Ok(this)
     }
 }

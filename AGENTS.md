@@ -18,6 +18,16 @@ Related repos:
 - PCM5102: BCK=GPIO6, LRCK/WS=GPIO4, DIN=GPIO5, MCLK=GPIO7
 - I2S: 44100 Hz, stereo 16-bit, 256-frame blocks (~5.805 ms deadline)
 - UART/flash: `/dev/ttyACM0` (CH340). USB OTG port = USB-MIDI host (hub support on)
+- OLED 1.3" SH1106 (SPI2): SCK=GPIO9, MOSI=GPIO10, RES=GPIO11, DC=GPIO12, CS=GPIO13
+- Rotary encoder (PCNT): CLK=GPIO38, DT=GPIO39, SW=GPIO40
+- FX buttons L→R: GPIO41, GPIO42, + GPIO2/1 (breadboard) or GPIO15/16 (`devboard`)
+- Dev-board pots (4×, ADC1): GPIO1, GPIO2, GPIO3, GPIO8 — PCB
+  `pcb-rust-in-synth` wires these; ADC read path not yet implemented
+- Dev-board DIN-5 MIDI IN only (PCB): RX=GPIO17 (H11L1S optocoupler
+  output); no MIDI OUT — GPIO18 free; UART MIDI driver not yet implemented
+- Dev-board audio I/O: PCM1860 ADC (VINL1/AUDIO_IN_L, VINR1/AUDIO_IN_R),
+  PCM5102 DAC (OUTL/AUDIO_OUT_L, OUTR/AUDIO_OUT_R) →
+  4× Neutrik NRJ6HF-1 6.35mm jacks (J1-J4) on the audio sheet
 - Task layout: audio render pinned to Core 1; USB host + Wi-Fi/HTTP on Core 0;
   MIDI→audio via lock-free SPSC ring (`usb_midi.rs`)
 
@@ -26,6 +36,7 @@ Related repos:
 ```bash
 cd ~/Documents/PlatformIO/Projects/audio-tools && cargo test --workspace
 cd ~/Documents/PlatformIO/Projects/rinsynth-esp32 && cargo build --release
+# dev-board pinout (FX btn 3/4 on GPIO15/16): cargo build --release --features devboard
 ~/.cargo/bin/espflash flash --port /dev/ttyACM0 --monitor target/xtensa-esp32s3-espidf/release/rinsynth-esp32
 # if auto-reset fails: hold BOOT, tap RESET, release BOOT; use --before no-reset
 ```

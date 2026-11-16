@@ -22,6 +22,13 @@ embedded-svc = "0.28"
 [build-dependencies]
 embuild = { version = "0.33", features = ["espidf"] }
 
+[features]
+# ESP32S3 Dev Board pinout: FX buttons 3/4 move off GPIO2/1 onto GPIO15/16
+# so ADC1 CH0/1/2/7 (GPIO1/2/3/8) can host the four front-panel pots.
+# Breadboard prototype keeps the default wiring (buttons on 41/42/2/1).
+# Dev board builds: cargo build --release --features devboard
+devboard = []
+
 # Xtensa LLVM-21 backend regression (esp-rs/rust#277): cannot lower
 # aggregate constant-pool entries — any serde f32 Deserialize impl hits
 # "Cannot select PCREL_WRAPPER" at any opt level > 0. The model crate is
