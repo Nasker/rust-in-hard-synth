@@ -35,17 +35,33 @@ fn main() -> anyhow::Result<()> {
     // until the web server is up, then dim green.
     status::init(p.pins.gpio48);
 
-    // FX buttons 3/4: breadboard prototype keeps GPIO 2/1; the `devboard`
-    // feature (cargo build --features devboard) moves them to GPIO 15/16
-    // so ADC1 CH0/1 (GPIO 1/2) can host the board's pots. See Cargo.toml.
+    // Pinout selection. Breadboard (default) keeps the prototype wiring.
+    // The `devboard` feature (cargo build --features devboard) matches the
+    // pcb-rust-in-synth board: all signals moved onto header-safe GPIOs —
+    // nothing on GPIO26-32 (flash/PSRAM), GPIO33-37 (octal PSRAM), or
+    // USB/UART; GPIO0/45/46 stay usable since outputs can't strap and the
+    // encoder can only pull GPIO46 low (safe level).
+    //
+    // devboard: OLED SCK=41 SDA=40 RES=42 DC=2 CS=1 | FX btns L→R
+    // 8/18/17/16 | enc CLK=15 DT=46 SW=9 | I2S BCK=21 DIN=0 MCLK=39
+    // WS=45 ADC_DOUT=38 | pots 4/5/6/7 | MIDI RX=14 | SD 10/11/12/13.
     #[cfg(feature = "devboard")]
-    let (fx_btn2, fx_btn3) = (p.pins.gpio15, p.pins.gpio16);
+    ui::init(
+        p.spi2,
+        p.pins.gpio41, // OLED SCK
+        p.pins.gpio40, // OLED SDA/MOSI
+        p.pins.gpio42, // OLED RES
+        p.pins.gpio2,  // OLED DC
+        p.pins.gpio1,  // OLED CS
+        p.pins.gpio8,  // FX btn 1
+        p.pins.gpio18, // FX btn 2
+        p.pins.gpio17, // FX btn 3
+        p.pins.gpio16, // FX btn 4
+        p.pins.gpio15, // encoder CLK
+        p.pins.gpio46, // encoder DT (input-only pin)
+        p.pins.gpio9,  // encoder SW
+    );
     #[cfg(not(feature = "devboard"))]
-    let (fx_btn2, fx_btn3) = (p.pins.gpio2, p.pins.gpio1);
-
-    // 1.3" SPI OLED (SH1106/SSD1306): CLK=GPIO9, MOSI=GPIO10, RES=GPIO11,
-    // DC=GPIO12, CS=GPIO13 + FX buttons=GPIO41/42 + btn2/btn3 +
-    // Encoder=GPIO38/39/40. Starts the animated SPLASH screen on Core 0.
     ui::init(
         p.spi2,
         p.pins.gpio9,
@@ -55,8 +71,8 @@ fn main() -> anyhow::Result<()> {
         p.pins.gpio13,
         p.pins.gpio41,
         p.pins.gpio42,
-        fx_btn2,
-        fx_btn3,
+        p.pins.gpio2,
+        p.pins.gpio1,
         p.pins.gpio38,
         p.pins.gpio39,
         p.pins.gpio40,
@@ -68,6 +84,16 @@ fn main() -> anyhow::Result<()> {
         StdGpioConfig::default(),
     );
     let modem = p.modem;
+    #[cfg(feature = "devboard")]
+    let tx = I2sDriver::new_std_tx(
+        p.i2s0,
+        &std_cfg,
+        p.pins.gpio21,       // BCK
+        p.pins.gpio0,        // DOUT -> PCM5102 DIN
+        Some(p.pins.gpio39), // MCLK
+        p.pins.gpio45,       // LRCK/WS
+    )?;
+    #[cfg(not(feature = "devboard"))]
     let tx = I2sDriver::new_std_tx(
         p.i2s0,
         &std_cfg,

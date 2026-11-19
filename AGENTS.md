@@ -15,16 +15,26 @@ Related repos:
 ## Hardware
 
 - ESP32-S3 rev v0.2, 16 MB flash, 8 MB octal PSRAM
-- PCM5102: BCK=GPIO6, LRCK/WS=GPIO4, DIN=GPIO5, MCLK=GPIO7
+- PCM5102: BCK=GPIO6, LRCK/WS=GPIO4, DIN=GPIO5, MCLK=GPIO7 (breadboard);
+  `devboard`: BCK=GPIO21, LRCK/WS=GPIO45, DIN=GPIO0, MCLK=GPIO39
 - I2S: 44100 Hz, stereo 16-bit, 256-frame blocks (~5.805 ms deadline)
 - UART/flash: `/dev/ttyACM0` (CH340). USB OTG port = USB-MIDI host (hub support on)
-- OLED 1.3" SH1106 (SPI2): SCK=GPIO9, MOSI=GPIO10, RES=GPIO11, DC=GPIO12, CS=GPIO13
-- Rotary encoder (PCNT): CLK=GPIO38, DT=GPIO39, SW=GPIO40
-- FX buttons L→R: GPIO41, GPIO42, + GPIO2/1 (breadboard) or GPIO15/16 (`devboard`)
-- Dev-board pots (4×, ADC1): GPIO1, GPIO2, GPIO3, GPIO8 — PCB
+- OLED 1.3" SH1106 (SPI2): SCK=GPIO9, MOSI=GPIO10, RES=GPIO11, DC=GPIO12,
+  CS=GPIO13 (breadboard); `devboard`: SCK=41, MOSI=40, RES=42, DC=2, CS=1
+- Rotary encoder (PCNT): CLK=GPIO38, DT=GPIO39, SW=GPIO40 (breadboard);
+  `devboard`: CLK=GPIO15, DT=GPIO46 (input-only), SW=GPIO9
+- FX buttons L→R: GPIO41, GPIO42, GPIO2, GPIO1 (breadboard);
+  `devboard`: GPIO8, GPIO18, GPIO17, GPIO16 (PCB SW1/SW2/SW4/SW5 row)
+- Dev-board pots (4×, ADC1): GPIO4, GPIO5, GPIO6, GPIO7 — PCB
   `pcb-rust-in-synth` wires these; ADC read path not yet implemented
-- Dev-board DIN-5 MIDI IN only (PCB): RX=GPIO17 (H11L1S optocoupler
-  output); no MIDI OUT — GPIO18 free; UART MIDI driver not yet implemented
+- Dev-board DIN-5 MIDI IN only (PCB): RX=GPIO14 (H11L1S optocoupler
+  output); no MIDI OUT; UART MIDI driver not yet implemented
+- Dev-board microSD (PCB, SPI): CS=GPIO10, MOSI=GPIO11, SCK=GPIO12,
+  MISO=GPIO13 — driver not yet implemented
+- Dev-board PCM1860 ADC I2S input (PCB): DOUT=GPIO38 — I2S RX path not
+  yet implemented. GPIO33-37 are octal-PSRAM pins on the N16R8 and must
+  never be assigned (that's why I2S moved off 35/36/37); GPIO47 spare,
+  GPIO48 stays the RGB status LED
 - Dev-board audio I/O: PCM1860 ADC (VINL1/AUDIO_IN_L, VINR1/AUDIO_IN_R),
   PCM5102 DAC (OUTL/AUDIO_OUT_L, OUTR/AUDIO_OUT_R) →
   4× Neutrik NRJ6HF-1 6.35mm jacks (J1-J4) on the audio sheet

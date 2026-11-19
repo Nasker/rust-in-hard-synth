@@ -16,9 +16,7 @@ use crate::usb_midi;
 use crate::web;
 use rinsynth_esp32::control::{self, SynthCommand};
 use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::gpio::{
-    Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, InputPin, OutputPin,
-};
+use esp_idf_hal::gpio::{InputPin, OutputPin};
 use esp_idf_hal::spi::SpiAnyPins;
 use log::{info, warn};
 use rinsynth_esp32::ui_parameters::ParamTarget;
@@ -1123,9 +1121,9 @@ fn ui_task_loop(display: &mut impl Display, inputs: &mut Option<PhysicalInputs<'
     }
 }
 
-/// Initialize the 1.3" SPI OLED (`GPIO 9..13`), FX kill buttons
-/// (`GPIO 41`, `42` + target-selected `btn2`/`btn3`), and PCNT rotary
-/// encoder (`GPIO 38..40`), then spawn the Core 0 UI task.
+/// Initialize the SPI OLED, FX kill buttons, and PCNT rotary encoder —
+/// all pins are caller-selected (breadboard vs `devboard` PCB pinout in
+/// main.rs), then spawn the Core 0 UI task.
 #[allow(clippy::too_many_arguments)]
 pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     spi: SPI,
@@ -1134,13 +1132,13 @@ pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     res: RES,
     dc: DC,
     cs: CS,
-    btn0_gpio41: Gpio41<'static>,
-    btn1_gpio42: Gpio42<'static>,
+    btn0: impl InputPin + Send + 'static,
+    btn1: impl InputPin + Send + 'static,
     btn2: impl InputPin + Send + 'static,
     btn3: impl InputPin + Send + 'static,
-    enc_clk_gpio38: Gpio38<'static>,
-    enc_dt_gpio39: Gpio39<'static>,
-    enc_sw_gpio40: Gpio40<'static>,
+    enc_clk: impl InputPin + Send + 'static,
+    enc_dt: impl InputPin + Send + 'static,
+    enc_sw: impl InputPin + Send + 'static,
 ) where
     SPI: SpiAnyPins + Send + 'static,
     SCLK: OutputPin + Send + 'static,
@@ -1150,13 +1148,7 @@ pub fn init<SPI, SCLK, MOSI, RES, DC, CS>(
     CS: OutputPin + Send + 'static,
 {
     let mut inputs = match PhysicalInputs::new(
-        btn0_gpio41,
-        btn1_gpio42,
-        btn2,
-        btn3,
-        enc_clk_gpio38,
-        enc_dt_gpio39,
-        enc_sw_gpio40,
+        btn0, btn1, btn2, btn3, enc_clk, enc_dt, enc_sw,
     ) {
         Ok(inp) => Some(inp),
         Err(e) => {

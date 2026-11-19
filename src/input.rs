@@ -4,18 +4,16 @@
 //! Single responsibility: turn raw hardware signals into debounced, jitter-free
 //! [`InputFrame`] snapshots at the UI frame rate (~25 Hz).
 //!
-//! Confirmed wiring — buttons 3/4 differ per target, selected in main.rs:
+//! Confirmed wiring — selected in main.rs:
 //! - FX buttons (L→R), breadboard: `GPIO 41`, `GPIO 42`, `GPIO 2`, `GPIO 1`
-//! - FX buttons (L→R), `devboard` feature: `GPIO 41`, `GPIO 42`, `GPIO 15`, `GPIO 16`
-//!   (moved off 2/1 to free ADC1 CH0/1 for the board's pots)
-//! - Rotary Encoder CLK:       `GPIO 38`
-//! - Rotary Encoder DT:        `GPIO 39`
-//! - Rotary Encoder Switch:    `GPIO 40` (active-low with internal pull-up)
+//! - FX buttons (L→R), `devboard` feature: `GPIO 8`, `GPIO 18`, `GPIO 17`, `GPIO 16`
+//!   (PCB SW1/SW2/SW4/SW5 row; moves everything off ADC1/PSRAM pins)
+//! - Rotary Encoder, breadboard: CLK `GPIO 38`, DT `GPIO 39`, SW `GPIO 40`
+//! - Rotary Encoder, `devboard`: CLK `GPIO 15`, DT `GPIO 46` (input-only pin),
+//!   SW `GPIO 9` (all active-low with internal pull-ups)
 
 use core::time::Duration;
-use esp_idf_hal::gpio::{
-    Gpio38, Gpio39, Gpio40, Gpio41, Gpio42, Input, InputPin, PinDriver, Pull,
-};
+use esp_idf_hal::gpio::{Input, InputPin, PinDriver, Pull};
 use esp_idf_hal::pcnt::config::{
     ChannelConfig, ChannelEdgeAction, ChannelLevelAction, GlitchFilterConfig, UnitConfig,
 };
@@ -110,15 +108,18 @@ fn now_ms() -> u32 {
 
 impl PhysicalInputs<'static> {
     pub fn new(
-        btn0_gpio41: Gpio41<'static>,
-        btn1_gpio42: Gpio42<'static>,
+        btn0: impl InputPin + 'static,
+        btn1: impl InputPin + 'static,
         btn2: impl InputPin + 'static,
         btn3: impl InputPin + 'static,
-        enc_clk_gpio38: Gpio38<'static>,
-        enc_dt_gpio39: Gpio39<'static>,
-        enc_sw_gpio40: Gpio40<'static>,
+        enc_clk: impl InputPin + 'static,
+        enc_dt: impl InputPin + 'static,
+        enc_sw: impl InputPin + 'static,
     ) -> Result<Self, EspError> {
-        // 1. Hardware PCNT quadrature decoder on GPIO 38 (CLK) + GPIO 39 (DT)
+        // 1. Hardware PCNT quadrature decoder on the encoder CLK + DT pins
+        //    (breadboard: GPIO 38/39; devboard: GPIO 15/46).
+        let enc_clk_pin = enc_clk.pin();
+        let enc_dt_pin = enc_dt.pin();
         let mut pcnt = PcntUnitDriver::new(&UnitConfig {
             low_limit: -16384,
             high_limit: 16384,
@@ -130,29 +131,28 @@ impl PhysicalInputs<'static> {
         }))?;
         {
             let ch = pcnt.add_channel(
-                Some(enc_clk_gpio38),
-                Some(enc_dt_gpio39),
+                Some(enc_clk),
+                Some(enc_dt),
                 &ChannelConfig::default(),
             )?;
             ch.set_edge_action(ChannelEdgeAction::Increase, ChannelEdgeAction::Decrease)?;
             ch.set_level_action(ChannelLevelAction::Keep, ChannelLevelAction::Inverse)?;
         }
-        // Ensure internal pull-ups are enabled on CLK (38) and DT (39).
+        // Ensure internal pull-ups are enabled on CLK and DT.
         unsafe {
-            gpio_pullup_en(38);
-            gpio_pullup_en(39);
+            gpio_pullup_en(enc_clk_pin.into());
+            gpio_pullup_en(enc_dt_pin.into());
         }
         pcnt.enable()?;
         pcnt.clear_count()?;
         pcnt.start()?;
 
-        // 2. Encoder push-switch on GPIO 40 (active-low, internal pull-up)
-        let sw = PinDriver::input(enc_sw_gpio40, Pull::Up)?;
+        // 2. Encoder push-switch (active-low, internal pull-up)
+        let sw = PinDriver::input(enc_sw, Pull::Up)?;
 
-        // 3. FX kill buttons on GPIO 41, 42 + btn2/btn3 (active-low, internal
-        //    pull-ups) — physical left→right = FX index [DIST,CHRS,DLY,REV].
-        //    btn2/btn3 are GPIO 2/1 on the breadboard and GPIO 15/16 with the
-        //    `devboard` feature; selected at the call site in main.rs.
+        // 3. FX kill buttons (active-low, internal pull-ups) — physical
+        //    left→right = FX index [DIST,CHRS,DLY,REV]. Pin selection
+        //    happens at the call site in main.rs.
         fn mk_btn<P: esp_idf_hal::gpio::InputPin + 'static>(pin: P) -> Result<FxButton, EspError> {
             Ok(FxButton {
                 pin: PinDriver::input(pin, Pull::Up)?,
@@ -160,12 +160,7 @@ impl PhysicalInputs<'static> {
                 last_fire_ms: 0,
             })
         }
-        let buttons = [
-            mk_btn(btn0_gpio41)?,
-            mk_btn(btn1_gpio42)?,
-            mk_btn(btn2)?,
-            mk_btn(btn3)?,
-        ];
+        let buttons = [mk_btn(btn0)?, mk_btn(btn1)?, mk_btn(btn2)?, mk_btn(btn3)?];
 
         let this = Self {
             pcnt,
@@ -180,7 +175,7 @@ impl PhysicalInputs<'static> {
             pending_click_ms: 0,
             buttons,
         };
-        info!("input: ready — Encoder(GPIO38/39/40) FXBtns(41/42 + btn2/btn3)");
+        info!("input: ready — PCNT encoder + 4 FX buttons (see main.rs pinout)");
         Ok(this)
     }
 }
